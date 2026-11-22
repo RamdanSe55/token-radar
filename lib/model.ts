@@ -1,12 +1,6 @@
-// Token Radar v2 — multi-factor implied value model.
-//
-// Improvements over starter:
-// - Category-aware base multiples (Risk Curators and RWA get higher multiples)
-// - TVL log-scaling instead of linear (diminishing returns on size)
-// - Growth momentum with outlier clamping
-// - Age/maturity curve that rewards protocols that have survived longer
-// - TVL-to-mcap ratio heuristic for comparable valuation
-// - All constants stated in the dashboard and changeable in the sandbox.
+// Token Radar v2 — multi-factor implied value model with category-aware multiples.
+// Scores every pre-token DeFi protocol by combining TVL, category, growth momentum,
+// and protocol maturity into a single implied value estimate.
 
 export interface SnapshotProtocol {
   slug: string;
@@ -29,8 +23,10 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** Category-specific base multiples: what fraction of TVL a token might be worth. */
-const CATEGORY_MULTIPLE: Record<string, number> = {
+// Category-specific base multiples: what fraction of TVL a token might be worth.
+// Higher for protocols with direct value capture (chains, curators, RWA).
+// Lower for commoditized or wrapped products (bridges, liquid staking).
+const CAT_MULT: Record<string, number> = {
   'Risk Curators': 0.35,
   'RWA': 0.30,
   'Onchain Capital Allocator': 0.28,
@@ -62,9 +58,8 @@ const CATEGORY_MULTIPLE: Record<string, number> = {
   'CEX': 0.0,
 };
 
-const DEFAULT_MULTIPLE = 0.15;
+const DEFAULT_MULT = 0.15;
 
-/** Model constants — stated in the dashboard and changeable in the sandbox. */
 export interface ModelConstants {
   growth_weight: number;
   growth_floor: number;
@@ -73,7 +68,6 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_days: number;
   unknown_age_days: number;
-  tvl_log_scale: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -84,16 +78,12 @@ export const MODEL: ModelConstants = {
   maturity_range: 0.5,
   maturity_days: 730,
   unknown_age_days: 365,
-  tvl_log_scale: 1.0,
 };
 
 export const MODEL_VERSION = 'radar-2';
-
-/** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 180;
-
-/** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
+// Extended early radar to capture more pre-token protocols below the floor.
 
 export interface FarmStep {
   text: string;
@@ -189,13 +179,11 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** Category-aware base multiple. */
-function categoryMultiple(category: string | null): number {
-  if (!category) return DEFAULT_MULTIPLE;
-  return CATEGORY_MULTIPLE[category] ?? DEFAULT_MULTIPLE;
+function catMult(category: string | null): number {
+  if (!category) return DEFAULT_MULT;
+  return CAT_MULT[category] ?? DEFAULT_MULT;
 }
 
-/** The implied value model: category multiple x TVL x growth x maturity. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
@@ -207,10 +195,10 @@ export function impliedValue(
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const catMult = categoryMultiple(protocol.category);
-  const base = protocol.tvl_usd * catMult;
+  const cm = catMult(protocol.category);
+  const base = protocol.tvl_usd * cm;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
-  return { implied, growthPct, growthMult, maturityMult, age, catMult };
+  return { implied, growthPct, growthMult, maturityMult, age, catMult: cm };
 }
 
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
@@ -227,13 +215,6 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
 }
 
-export interface BoardSummary {
-  watchlist_size: number;
-  board_size: number;
-  early_size: number;
-  live_size: number;
-}
-
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
@@ -248,8 +229,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const { implied, growthPct, growthMult, maturityMult, age, catMult } = impliedValue(p, snapshot.as_of, model);
-    return { p, implied, growthPct, growthMult, maturityMult, age, catMult };
+    const { implied, growthPct, growthMult, maturityMult, age, catMult: cm } = impliedValue(p, snapshot.as_of, model);
+    return { p, implied, growthPct, growthMult, maturityMult, age, cm };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -268,7 +249,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     implied_value_usd: s.implied,
     model: {
-      category_multiple: s.catMult,
+      category_multiple: s.cm,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
