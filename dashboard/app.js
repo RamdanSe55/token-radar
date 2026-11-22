@@ -294,7 +294,7 @@
     ]));
     drawer.appendChild(make('section', { class: 'drawer-body' }, [
       make('h3', { text: 'farm plan' }),
-      make('ol', { class: 'plan' }, row.farm_plan.map((step) => make('li', { text: step })))
+      make('ol', { class: 'plan' }, row.farm_steps.map((step) => make('li', { text: step })))
     ]));
     drawer.classList.add('show');
   }

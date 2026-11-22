@@ -126,7 +126,7 @@ export interface BoardLine {
   age_days: number | null;
   implied_value_usd: number;
   breakdown: ScoreBreakdown;
-  farm_plan: string[];
+  farm_steps: string[];
 }
 
 export interface LiveLine {
@@ -286,7 +286,7 @@ export function buildBoard(doc: SnapshotDoc, p: ScoreParams = SCORE_PARAMS): Boa
     age_days: entry.age,
     implied_value_usd: entry.value,
     breakdown: entry.breakdown,
-    farm_plan: farmPlan(entry.proto, entry.age),
+    farm_steps: farmPlan(entry.proto, entry.age),
   }));
 }
 
@@ -479,10 +479,10 @@ export function boardFault(board: BoardLine[], doc: SnapshotDoc): string | null 
     if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0) {
       return `${r.slug} has an invalid implied value ${r.implied_value_usd}`;
     }
-    if (r.farm_plan.length < 3 || r.farm_plan.length > 12) {
-      return `${r.slug} lists ${r.farm_plan.length} farm steps`;
+    if (r.farm_steps.length < 3 || r.farm_steps.length > 12) {
+      return `${r.slug} lists ${r.farm_steps.length} farm steps`;
     }
-    for (const step of r.farm_plan) {
+    for (const step of r.farm_steps) {
       if (step.trim().length < 20 || step.trim().length > 600) {
         return `${r.slug} has a farm step of ${step.trim().length} characters`;
       }

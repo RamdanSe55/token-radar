@@ -67,8 +67,12 @@ function mirrorTree(src: string, dst: string): number {
 const shots = mirrorTree(join(root, 'dashboard'), join(outDir, 'dashboard'));
 const pics = mirrorTree(join(root, 'screenshots'), join(outDir, 'screenshots'));
 
-const dossier = buildDossier(outDir, { text_max_bytes: DOSSIER_TEXT_CAP, screenshot_caps: SHOT_CAPS });
-writeFileSync(join(outDir, 'dossier.json'), `${JSON.stringify(dossier)}\n`);
+const dossier = buildDossier(outDir, {
+  text_max_bytes: DOSSIER_TEXT_CAP,
+  screenshots: SHOT_CAPS,
+  dashboard: { max_files: 400, max_bytes: 4_194_304 },
+});
+writeFileSync(join(outDir, 'dossier.json'), dossier);
 
 const below = board.filter((r) => !doc.watchlist.includes(r.slug)).length;
 process.stderr.write(`radar-score: ${doc.protocols.length} protocols scanned, ${doc.watchlist.length} watchlist, ${board.length} rows on the board (${below} below the floor), ${radar.live_count} live set aside\n`);
