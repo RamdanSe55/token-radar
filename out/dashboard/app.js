@@ -97,6 +97,7 @@
       if (view.tab === 'keep' && row.verdict.verdict !== 'keep') return false;
       if (view.tab === 'marginal' && row.verdict.verdict !== 'marginal') return false;
       if (view.tab === 'pass' && row.verdict.verdict !== 'pass') return false;
+      if (view.tab === 'rate' && row.verdict.net_per_hour_usd < 15) return false;
       if (view.category !== 'all' && (row.category || 'Other') !== view.category) return false;
       if (view.verdict !== 'all' && row.verdict.verdict !== view.verdict) return false;
       if (!needle) return true;
@@ -118,6 +119,7 @@
       else if (k === 'age_days') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else if (k === 'token_odds') { av = a.token_odds; bv = b.token_odds; }
       else if (k === 'net_usd') { av = a.verdict.net_usd; bv = b.verdict.net_usd; }
+      else if (k === 'rate') { av = a.verdict.net_per_hour_usd; bv = b.verdict.net_per_hour_usd; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -d;
       if (av > bv) return d;
@@ -175,7 +177,9 @@ function masthead() {
       { k: 'held out by age', v: `${v.time.miss_b.toFixed(2)}×`, sub: `${v.time.train_a} older trained · ${v.time.train_b} newer held out` },
       { k: 'walk-forward worst', v: `${v.walk.worst.toFixed(2)}×`, sub: `${v.walk.windows.length} windows · past trains, next tests` },
       { k: 'terms kept', v: `${v.terms.filter((x) => x.kept).length}/${v.terms.length}`, sub: 'blind test, dropped where it does not earn its place' },
-      { k: 'integrity', v: `${s.integrity.filter((i) => i.ok).length}/${s.integrity.length}`, sub: `${s.coverage.length} buckets · ${s.protocols} protocols accounted` }
+      { k: 'integrity', v: `${s.integrity.filter((i) => i.ok).length}/${s.integrity.length}`, sub: `${s.coverage.length} buckets · ${s.protocols} protocols accounted` },
+      { k: 'farm net', v: money(s.farm_net_usd), sub: `${s.farm_keep} keep · ${s.farm_marginal} marginal · ${s.farm_pass} pass` },
+      { k: 'median $/h', v: `$${s.farm_median_rate.toFixed(0)}`, sub: 'net ÷ hours over the keep set' }
     ];
     return make('section', { class: 'kpis' }, items.map((it) => make('div', { class: 'kpi' }, [
       make('dt', { text: it.k }),
@@ -231,7 +235,8 @@ function masthead() {
       { id: 'below', label: `Below floor ${below}` },
       { id: 'keep', label: `Keep ${farm}` },
       { id: 'marginal', label: `Marginal ${marginal}` },
-      { id: 'pass', label: `Skip ${skip}` }
+      { id: 'pass', label: `Skip ${skip}` },
+      { id: 'rate', label: `Best $/h` }
     ];
     const tabRow = make('div', { class: 'tab-row count-row' }, tabDefs.map((t) => make('button', {
       type: 'button', class: view.tab === t.id ? 'tab on' : 'tab', 'aria-pressed': String(view.tab === t.id),
@@ -257,11 +262,11 @@ function masthead() {
       blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
       name = 'radar-board.json';
     } else {
-      const head = ['rank', 'protocol', 'category', 'chains', 'tvl_usd', 'change_7d', 'age_days', 'implied_value_usd', 'token_odds', 'verdict', 'deposit_usd', 'net_usd'];
+      const head = ['rank', 'protocol', 'category', 'chains', 'tvl_usd', 'change_7d', 'age_days', 'implied_value_usd', 'token_odds', 'verdict', 'deposit_usd', 'net_usd', 'net_per_hour_usd', 'hours'];
       const lines = [head.join(',')];
       for (const r of list) {
         const v = r.verdict || {};
-        lines.push([r.rank, `"${(r.name || '').replace(/"/g, '""')}"`, r.category || 'Other', `"${(r.chains || []).join(' ')}"`, r.tvl_usd, r.change_7d ?? '', r.age_days ?? '', r.implied_value_usd, r.token_odds ?? '', v.verdict || '', v.deposit_usd ?? '', v.net_usd ?? ''].join(','));
+        lines.push([r.rank, `"${(r.name || '').replace(/"/g, '""')}"`, r.category || 'Other', `"${(r.chains || []).join(' ')}"`, r.tvl_usd, r.change_7d ?? '', r.age_days ?? '', r.implied_value_usd, r.token_odds ?? '', v.verdict || '', v.deposit_usd ?? '', v.net_usd ?? '', v.net_per_hour_usd ?? '', v.hours ?? ''].join(','));
       }
       blob = new Blob([lines.join('\n')], { type: 'text/csv' });
       name = 'radar-board.csv';
@@ -327,8 +332,9 @@ function masthead() {
         make('td', { class: 'odds', text: `${Math.round(row.token_odds * 100)}%` }),
         make('td', null, [verdictPill(row.verdict)]),
         make('td', { class: `num ${row.verdict.net_usd >= 0 ? 'up' : 'down'}`, text: `${row.verdict.net_usd >= 0 ? '+' : '−'}${money(Math.abs(row.verdict.net_usd))}` }),
+        make('td', { class: `num ${row.verdict.net_per_hour_usd >= 0 ? 'up' : 'down'}`, text: `$${Math.round(row.verdict.net_per_hour_usd)}` }),
         make('td', { class: 'tag', text: 'pre-token' })
-      ]);
+        ]);
       tr.addEventListener('click', () => openDrawer(row.slug));
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDrawer(row.slug); } });
       body.appendChild(tr);
@@ -348,6 +354,7 @@ function masthead() {
             sortable('token_odds', 'Odds'),
             make('th', { scope: 'col', text: 'Verdict' }),
             sortable('net_usd', 'Net'),
+            sortable('rate', '$ / h'),
             make('th', { scope: 'col', text: 'Token' })
           ])]),
           body
@@ -449,7 +456,9 @@ function masthead() {
         make('div', { class: 'row' }, [make('span', { text: 'modelled drop share' }), make('span', { text: `${v.drop_share_pct}%` })]),
         make('div', { class: 'row' }, [make('span', { text: 'est. value' }), make('span', { text: moneyFull(v.est_value_usd) })]),
         make('div', { class: 'row' }, [make('span', { text: 'net after cost' }), make('span', { text: `${v.net_usd >= 0 ? '+' : ''}${moneyFull(v.net_usd)}` })]),
-        make('div', { class: 'row' }, [make('span', { text: 'time' }), make('span', { text: `~${v.hours} h over ${v.horizon_weeks} wk` })])
+        make('div', { class: 'row' }, [make('span', { text: 'net per hour' }), make('span', { text: `${v.net_per_hour_usd >= 0 ? '+' : ''}$${v.net_per_hour_usd.toFixed(0)}/h` })]),
+        make('div', { class: 'row' }, [make('span', { text: 'time' }), make('span', { text: `~${v.hours} h over ${v.horizon_weeks} wk` })]),
+        make('div', { class: 'note', text: `verdict rule: keep needs a positive net and at least $15/h of time` })
       ]),
       make('h3', { text: 'farm plan' }),
       make('ol', { class: 'plan' }, row.farm_steps.map((step) => make('li', { text: step })))
@@ -561,6 +570,31 @@ function masthead() {
     ]);
   }
 
+  function farmEconomics() {
+    const s = doc.stats;
+    const keep = doc.rows.filter((r) => r.verdict.verdict === 'keep');
+    const top = keep.slice().sort((a, b) => b.verdict.net_per_hour_usd - a.verdict.net_per_hour_usd).slice(0, 10);
+    const rows = (top.length > 0 ? top : keep).map((r) => {
+      const v = r.verdict;
+      const rate = Math.max(0, v.net_per_hour_usd);
+      const peak = Math.max(1, ...(top.length > 0 ? top : keep).map((x) => x.verdict.net_per_hour_usd));
+      return make('div', { class: 'farm-row' }, [
+        make('span', { class: 'farm-rank', text: `#${r.rank}` }),
+        make('span', { class: 'farm-name', text: r.name }),
+        make('span', { class: 'farm-money', text: money(v.deposit_usd) }),
+        make('div', { class: 'meter slim', 'aria-hidden': 'true' }, [make('i', { style: `width:${Math.max(2, Math.round((rate / peak) * 100))}%` })]),
+        make('span', { class: `farm-rate ${v.net_per_hour_usd >= 15 ? 'up' : 'down'}`, text: `$${Math.round(v.net_per_hour_usd)}/h` }),
+        make('span', { class: 'farm-net', text: `${v.net_usd >= 0 ? '+' : '−'}${money(Math.abs(v.net_usd))}` })
+      ]);
+    });
+    const median = s.farm_median_rate;
+    return make('section', { class: 'panel farm' }, [
+      make('h2', { text: 'farm economics — what the keep set pays' }),
+      make('p', { class: 'method', text: `A farm is priced, not praised: implied value × modelled drop share × token odds, less the deposit and gas, divided by the hours the position asks for. The bar is keep = a positive net and at least $15/h of time. Of ${s.board} ranked rows, ${s.farm_keep} clear it, ${s.farm_marginal} are marginal and ${s.farm_pass} do not pay for their own time; the keep set's median is $${median.toFixed(0)}/h on ${money(s.farm_net_usd)} net.` }),
+      make('div', { class: 'farm-grid' }, rows)
+    ]);
+  }
+
   function paint() {
     stage.innerHTML = '';
     stage.appendChild(masthead());
@@ -570,6 +604,7 @@ function masthead() {
     stage.appendChild(controls());
     stage.appendChild(view.pane === 'pre' ? preTable() : liveTable());
     if (view.pane === 'pre') stage.appendChild(method());
+    if (view.pane === 'pre') stage.appendChild(farmEconomics());
     stage.appendChild(drawer);
     if (view.openSlug) openDrawer(view.openSlug);
   }

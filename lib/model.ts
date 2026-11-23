@@ -1,4 +1,4 @@
-// radar-score v4 — implied-value model for pre-token DeFi protocols.
+// radar-score v9 — implied-value model for pre-token DeFi protocols.
 //
 // The radar's job: a protocol with no token yet still creates real economic
 // value. Its future token can only claim a slice of that value, and the slice
@@ -7,17 +7,22 @@
 // broadly it is deployed. This module turns one sealed snapshot into a ranked
 // board.
 //
-// v4's score is a multiplicative model over the snapshot's own figures, fitted
-// once on a held-out split and checked twice out of sample:
+// v9's score is a multiplicative model over the snapshot's own figures, fitted
+// once on a held-out split, then checked out of sample three ways (index, age
+// and rolling-origin), with every term kept or dropped on a blind test:
 //
 //   implied = BASE(category)
 //           · (tvl / TVL_SCALE)^TVL_EXPONENT        size curve
 //           · fee_curve(log10 tvl)                    revenue scale, fitted
-//           · (1 + clamp(growth)/100 · GROWTH_SENS)  momentum
+//           · (1 + clamp(growth)/100 · GROWTH_SENS)  momentum (blind-kept)
 //           · (MAT_FLOOR + min(age,SPAN)/SPAN·GAIN)   maturity
 //           · (1 + min(chains·CHAIN_STEP, CAP))       diversity
 //           · (1 + 0.06·EVM)                          deployment breadth
 //           · 10^6
+//
+// A farm verdict prices the position: implied x modelled drop share x token
+// odds, less deposit and gas, divided by the hours the position asks for, so a
+// tiny flattering ratio cannot be called a winner.
 //
 // Every term is a pure function of snapshot fields; no protocol name is
 // special-cased, so the whole board recomputes from the snapshot alone.
@@ -81,7 +86,7 @@ export const SCORE_PARAMS: ScoreParams = {
   max_implied: 99_999_999_999_999,
 };
 
-export const SCORE_TAG = 'radar-score v8';
+export const SCORE_TAG = 'radar-score v9';
 
 // Base weight: the share of TVL that a token of this category could plausibly
 // command at launch. Chains and curators sit at the top because their tokens
@@ -130,6 +135,7 @@ export interface FarmVerdict {
   est_value_usd: number;
   net_usd: number;
   hours: number;
+  net_per_hour_usd: number;
   note: string;
 }
 
@@ -218,6 +224,12 @@ export interface ModelStats {
   };
   /** Every scanned protocol is accounted for: where it falls, none silently dropped. */
   coverage: { bucket: string; count: number; note: string }[];
+  /** Farm economics across the board: what the keep set pays, and how the bar is set. */
+  farm_net_usd: number;
+  farm_keep: number;
+  farm_marginal: number;
+  farm_pass: number;
+  farm_median_rate: number;
   /** The page's own reconciliation against the data file it was served. */
   integrity: { name: string; ok: boolean; detail: string }[];
 }
@@ -393,6 +405,16 @@ function stakeSize(tvl: number): number {
   return 50;
 }
 
+/** The weekly hours a position of this size and horizon asks for. */
+function hoursPerWeek(usd: number): number {
+  return usd >= 300 ? 2 : usd >= 100 ? 1.5 : 1;
+}
+
+/** A deposit's gross expected value: implied value x modelled drop share x odds. */
+function grossValue(impliedUsd: number, dropShare: number, odds: number): number {
+  return impliedUsd * dropShare * odds * 0.0015;
+}
+
 function holdSpan(ageDays: number | null): number {
   if (ageDays === null) return 35;
   if (ageDays < 90) return 95;
@@ -458,12 +480,18 @@ export function farmVerdict(proto: ProtoInput, ageDays: number | null, impliedUs
   const dropShare = Math.max(0.15, Math.min(0.9, tvl / 4_000_000_000));
   // a farm's expected value: the share of implied value a sized deposit can
   // reach, discounted by the odds the token exists at all
-  const estValue = Math.round(impliedUsd * dropShare * odds * 0.0015);
+  const estValue = Math.round(grossValue(impliedUsd, dropShare, odds));
   const net = estValue - usd - gas;
-  const hours = Math.max(2, Math.round(weeks * 1.4));
-  const verdict: FarmVerdict['verdict'] = net > usd * 2 ? 'keep' : net > 0 ? 'marginal' : 'pass';
+  // Time cost: each week asks a few hours of upkeep, plus one setup session.
+  const perWeek = hoursPerWeek(usd);
+  const hours = Math.max(2, Math.round(weeks * perWeek + 2));
+  const rate = net / hours;
+  // The bar is the time rate: a position must pay at least $15/h of the
+  // reader's time and not lose money. Net > 0 is implied by rate >= 15 on a
+  // positive-hour position, so the two conditions read as one clean test.
+  const verdict: FarmVerdict['verdict'] = net > 0 && rate >= 15 ? 'keep' : net > 0 ? 'marginal' : 'pass';
   const note = `${moneyShort(impliedUsd)} implied × ${Math.round(dropShare * 100)}% modelled drop share × ${Math.round(odds * 100)}% token odds, less ${usd} deposit and ${gas} gas`;
-  return { verdict, deposit_usd: usd, horizon_weeks: weeks, drop_share_pct: Math.round(dropShare * 1000) / 10, est_value_usd: estValue, net_usd: net, hours, note };
+  return { verdict, deposit_usd: usd, horizon_weeks: weeks, drop_share_pct: Math.round(dropShare * 1000) / 10, est_value_usd: estValue, net_usd: net, hours, net_per_hour_usd: round2(rate), note };
 }
 
 export function farmPlan(proto: ProtoInput, ageDays: number | null, v: FarmVerdict): string[] {
@@ -471,10 +499,15 @@ export function farmPlan(proto: ProtoInput, ageDays: number | null, v: FarmVerdi
   const usd = v.deposit_usd;
   const days = holdSpan(ageDays);
   const gas = usd >= 300 ? 14 : usd >= 100 ? 7 : 3;
+  const perWeek = hoursPerWeek(usd);
+  const hrs = v.hours;
+  // The plan is mechanism-aware: the engagement move names the actual action
+  // this category rewards, and every step carries its own cost and time so the
+  // reader can budget the position rather than take a generic checklist.
   return [
-    `create a dedicated farm wallet, hold only the ${usd} you plan to commit in it, and keep the seed phrase offline until the very end`,
-    `${engagementMove(proto, usd, chain)}. This costs ${usd} of capital plus roughly ${gas} dollars of gas and about fifteen minutes to set up`,
-    `each week do one fresh qualifying action — a deposit, a borrow, a swap, a vote or a claim — so the activity lands in several checkpoints`,
+    `create a dedicated farm wallet, fund it with only the ${usd} you plan to commit, and keep the seed phrase offline until the very end — setup about 0.5 h, ${gas} gas`,
+    `${engagementMove(proto, usd, chain)}. This commits ${usd} of capital plus roughly ${gas} dollars of gas and about fifteen minutes to set up`,
+    `each week do one fresh qualifying action — a deposit, a borrow, a swap, a vote or a claim — so the activity lands in several checkpoints; budget ${perWeek} h per week`,
     `hold for at least ${days} days; multi-checkpoint history is what keeps the position out of the sybil filters`,
     `target ${v.horizon_weeks} weeks of history before the likely launch window, and size the position at ${usd} so a full loss stays boring`,
     `before withdrawing, check the protocol's own rewards page and claim only through the link it publishes; never pay a fee to claim`,
@@ -516,6 +549,11 @@ function pricedPool(doc: SnapshotDoc): PricedProto[] {
 }
 
 function median(xs: number[]): number {
+  return medianOf(xs);
+}
+
+/** Local alias kept for readability where `median` is shadowed. */
+function medianOf(xs: number[]): number {
   if (xs.length === 0) return 0;
   const s = xs.slice().sort((a, b) => a - b);
   const mid = Math.floor(s.length / 2);
@@ -790,7 +828,9 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     { name: 'board equals data file', ok: board.length === doc.watchlist.length + (board.length - covered), detail: `${board.length} rows` },
     { name: 'every scan accounted', ok: sum === doc.protocols.length, detail: `${sum}/${doc.protocols.length} protocols` },
     { name: 'ranks unique and dense', ok: board.every((r, i) => r.rank === i + 1), detail: `1..${board.length}` },
-    { name: 'ordered by implied value', ok: board.every((r, i) => i === 0 || board[i - 1]!.implied_value_usd >= r.implied_value_usd), detail: 'descending' }
+    { name: 'ordered by implied value', ok: board.every((r, i) => i === 0 || board[i - 1]!.implied_value_usd >= r.implied_value_usd), detail: 'descending' },
+    { name: 'farm verdicts priced', ok: board.every((r) => Number.isFinite(r.verdict.net_per_hour_usd) && r.verdict.hours > 0), detail: 'net ÷ hours on every row' },
+    { name: 'verdict rule agrees', ok: board.every((r) => (r.verdict.verdict === 'keep') === (r.verdict.net_usd > 0 && r.verdict.net_per_hour_usd >= 15)), detail: 'keep = net > 0 and ≥ $15/h' }
   ];
   return {
     protocols: doc.protocols.length,
@@ -815,6 +855,11 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     fitted: fit.fitted,
     validation: fit.validation,
     coverage,
+    farm_net_usd: Math.round(board.reduce((s, r) => s + r.verdict.net_usd, 0)),
+    farm_keep: board.filter((r) => r.verdict.verdict === 'keep').length,
+    farm_marginal: board.filter((r) => r.verdict.verdict === 'marginal').length,
+    farm_pass: board.filter((r) => r.verdict.verdict === 'pass').length,
+    farm_median_rate: round2(medianOf(board.filter((r) => r.verdict.verdict === 'keep').map((r) => r.verdict.net_per_hour_usd))),
     integrity,
   };
 }
