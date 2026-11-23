@@ -1,16 +1,17 @@
-// radar-score v3 dashboard — one plain script, no framework, no network.
+// radar-score v4 dashboard — one plain script, no framework, no network.
 //
 // The page binds to window.RADAR, the JSON document main.ts writes as data.js
-// next to this file. Everything shown is recomputable from that document:
-// the board, the filters, the live-token table and the per-protocol drawer
-// with its score breakdown and farm plan.
+// next to this file. Everything shown is recomputable from that document: the
+// KPI strip, the funnel, the board, the filters, the live-token table and the
+// per-protocol drawer with its score breakdown, peer set, farm verdict and
+// farm plan.
 
 (function () {
   'use strict';
   const doc = window.RADAR;
   if (!doc) return;
   const stage = document.getElementById('board');
-  const view = { query: '', category: 'all', pane: 'pre', sortKey: 'implied_value_usd', sortDir: -1, openSlug: null };
+  const view = { query: '', category: 'all', verdict: 'all', pane: 'pre', sortKey: 'implied_value_usd', sortDir: -1, openSlug: null };
 
   function money(v) {
     if (v === null || v === undefined || !isFinite(v)) return '—';
@@ -20,17 +21,20 @@
     if (v >= 1e3) return `$${Math.round(v / 1e3)}K`;
     return `$${Math.round(v)}`;
   }
-
+  function moneyFull(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '—';
+    return `$${Math.round(v).toLocaleString('en-US')}`;
+  }
   function pct(v) {
     if (v === null || v === undefined || !isFinite(v)) return '—';
     return `${v > 0 ? '+' : ''}${v.toFixed(1)}%`;
   }
-
   function age(v) {
     if (v === null || v === undefined) return 'unknown';
     if (v >= 365) return `${(v / 365).toFixed(1)} yr`;
     return `${Math.round(v)} d`;
   }
+  function num2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
 
   function make(tag, attrs, kids) {
     const node = document.createElement(tag);
@@ -57,12 +61,14 @@
 
   function recompute(row) {
     const p = doc.params;
-    const base = row.breakdown.base_weight;
+    const b = row.breakdown;
     const tvlTerm = Math.pow(row.tvl_usd / p.tvl_scale, p.tvl_exponent);
-    const momentum = Math.max(0.2, 1 + (row.breakdown.growth_used_pct / 100) * p.growth_sensitivity);
-    const maturity = p.maturity_floor + (Math.min(Math.max(row.breakdown.age_days_used ?? p.assumed_age_days, 0), p.maturity_span_days) / p.maturity_span_days) * p.maturity_gain;
-    const diversity = 1 + Math.min(row.chains.length * p.chain_step, p.chain_cap);
-    return Math.max(p.min_implied, Math.round(base * tvlTerm * momentum * maturity * diversity * 1e6));
+    const decades = Math.log10(Math.max(row.tvl_usd, 1) / p.tvl_scale);
+    const fee = p.fee_floor + p.fee_gain * Math.min(Math.max(decades, 0), 6);
+    const momentum = Math.max(0.2, 1 + (b.growth_used_pct / 100) * p.growth_sensitivity);
+    const maturity = p.maturity_floor + (Math.min(Math.max(b.age_days_used ?? p.assumed_age_days, 0), p.maturity_span_days) / p.maturity_span_days) * p.maturity_gain;
+    const diversity = b.diversity_term;
+    return Math.max(p.min_implied, Math.round(b.base_weight * tvlTerm * fee * momentum * maturity * diversity * 1e6));
   }
 
   function hashSync() {
@@ -71,7 +77,6 @@
     view.category = parts.get('cat') || 'all';
     view.openSlug = parts.get('p') || null;
   }
-
   function hashPush() {
     const parts = new URLSearchParams();
     if (view.query) parts.set('q', view.query);
@@ -85,6 +90,7 @@
     const needle = view.query.trim().toLowerCase();
     return doc.rows.filter((row) => {
       if (view.category !== 'all' && (row.category || 'Other') !== view.category) return false;
+      if (view.verdict !== 'all' && row.verdict.verdict !== view.verdict) return false;
       if (!needle) return true;
       const hay = [row.name, row.slug, row.category || '', row.chains.join(' ')].join(' ').toLowerCase();
       return hay.includes(needle);
@@ -101,6 +107,8 @@
       else if (k === 'tvl_usd') { av = a.tvl_usd; bv = b.tvl_usd; }
       else if (k === 'change_7d') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (k === 'age_days') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
+      else if (k === 'token_odds') { av = a.token_odds; bv = b.token_odds; }
+      else if (k === 'net_usd') { av = a.verdict.net_usd; bv = b.verdict.net_usd; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -d;
       if (av > bv) return d;
@@ -125,18 +133,35 @@
     ]);
   }
 
-  function summary() {
-    return make('section', { class: 'summary' }, [
-      make('div', { class: 'summary-text' }, [
-        make('h1', { text: `${doc.watch_count} watched protocols, ${doc.board_count} ranked` }),
-        make('p', { text: `The watchlist is the floor, not the ceiling: it names the ${doc.watch_count} protocols at or above ${money(doc.floor_usd)} of TVL with no token on record. Below it, the radar pulls in ${doc.early_count} more pre-token protocols by TVL. Implied value is a model of what a future token could claim — not a price.` })
-      ]),
-      make('dl', { class: 'summary-facts' }, [
-        make('div', null, [make('dt', { text: 'watchlist covered' }), make('dd', { text: `${doc.watch_count} / ${doc.watch_count}` })]),
-        make('div', null, [make('dt', { text: 'pre-token rows' }), make('dd', { text: String(doc.board_count) })]),
-        make('div', null, [make('dt', { text: 'below the floor' }), make('dd', { text: String(doc.early_count) })]),
-        make('div', null, [make('dt', { text: 'live set aside' }), make('dd', { text: String(doc.live_count) })])
-      ])
+  function kpis() {
+    const s = doc.stats;
+    const impliedSum = s.implied_sum_usd;
+    const items = [
+      { k: 'protocols scanned', v: String(s.protocols), sub: `${s.live} live token` },
+      { k: 'watchlist covered', v: `${s.watch} / ${s.watch}`, sub: `${Math.round((s.watch / Math.max(s.watch, 1)) * 100)}%`, frac: s.watch / Math.max(s.watch, 1) },
+      { k: 'board rows', v: String(s.board), sub: `${s.below_floor} below floor` },
+      { k: 'implied value', v: money(impliedSum), sub: `median ${money(s.implied_median_usd)}` },
+      { k: 'pre-token pool', v: String(s.pre_token), sub: `${s.excluded_cexs} CEX set aside` },
+      { k: 'model fit', v: s.fitted ? 'held-out' : 'none', sub: `${s.split_a}/${s.split_b} split` }
+    ];
+    return make('section', { class: 'kpis' }, items.map((it) => make('div', { class: 'kpi' }, [
+      make('dt', { text: it.k }),
+      make('dd', null, [document.createTextNode(it.v), make('small', { text: `  ${it.sub}` })]),
+      it.frac === undefined ? null : make('div', { class: 'bar' }, [make('i', { style: `width:${Math.round(it.frac * 100)}%` })])
+    ])));
+  }
+
+  function funnel() {
+    const s = doc.stats;
+    return make('div', { class: 'funnel' }, [
+      make('span', { text: 'accounting' }),
+      make('span', { class: 'chip in', html: '' }, ['in: ', make('b', { text: String(s.protocols) }), ' snapshot']),
+      make('span', { class: 'chip in' }, ['in: ', make('b', { text: String(s.pre_token) }), ' pre-token']),
+      make('span', { class: 'chip out' }, ['out: ', make('b', { text: String(s.excluded_cexs) }), ' CEX']),
+      make('span', { class: 'chip in' }, ['in: ', make('b', { text: String(s.watch) }), ' watchlist']),
+      make('span', { class: 'chip in' }, ['in: ', make('b', { text: String(s.below_floor) }), ' below floor']),
+      make('span', { class: 'chip net' }, ['net: ', make('b', { text: String(s.board) }), ' ranked']),
+      make('span', { class: 'chip out' }, ['set aside: ', make('b', { text: String(s.live) }), ' live'])
     ]);
   }
 
@@ -149,15 +174,53 @@
       ...cats.map((c) => make('option', { value: c, text: c, selected: c === view.category ? 'selected' : null }))
     ]);
     pick.addEventListener('change', () => { view.category = pick.value; hashPush(); paint(); });
+    const vpick = make('select', { id: 'verdict', 'aria-label': 'Verdict filter' }, [
+      make('option', { value: 'all', text: 'All verdicts', selected: view.verdict === 'all' ? 'selected' : null }),
+      make('option', { value: 'keep', text: 'Keep', selected: view.verdict === 'keep' ? 'selected' : null }),
+      make('option', { value: 'marginal', text: 'Marginal', selected: view.verdict === 'marginal' ? 'selected' : null }),
+      make('option', { value: 'pass', text: 'Pass', selected: view.verdict === 'pass' ? 'selected' : null })
+    ]);
+    vpick.addEventListener('change', () => { view.verdict = vpick.value; hashPush(); paint(); });
     const preBtn = make('button', { type: 'button', 'aria-pressed': String(view.pane === 'pre'), text: 'Pre-token', class: view.pane === 'pre' ? 'tab on' : 'tab', onclick: () => { view.pane = 'pre'; paint(); } });
     const liveBtn = make('button', { type: 'button', 'aria-pressed': String(view.pane === 'live'), text: 'Live token', class: view.pane === 'live' ? 'tab on' : 'tab', onclick: () => { view.pane = 'live'; paint(); } });
+    const csvBtn = make('button', { type: 'button', class: 'btn', text: 'CSV', onclick: () => exportRows() });
+    const jsonBtn = make('button', { type: 'button', class: 'btn', text: 'JSON', onclick: () => exportRows(true) });
     const shown = view.pane === 'pre' ? filteredRows().length : doc.live.length;
     return make('div', { class: 'controls' }, [
       make('label', { class: 'field' }, [make('span', { text: 'search' }), search]),
       make('label', { class: 'field' }, [make('span', { text: 'category' }), pick]),
+      make('label', { class: 'field' }, [make('span', { text: 'verdict' }), vpick]),
       make('div', { class: 'field tabs' }, [make('span', { text: 'status' }), make('div', { class: 'tab-row' }, [preBtn, liveBtn])]),
+      make('div', { class: 'field tabs' }, [make('span', { text: 'export' }), make('div', { class: 'tab-row' }, [csvBtn, jsonBtn])]),
       make('span', { class: 'shown', text: `${shown} ${view.pane === 'pre' ? 'rows' : 'protocols'}` })
     ]);
+  }
+
+  function exportRows(asJson) {
+    const list = view.pane === 'pre' ? orderedRows(filteredRows()) : doc.live;
+    let blob;
+    let name;
+    if (asJson) {
+      blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
+      name = 'radar-board.json';
+    } else {
+      const head = ['rank', 'protocol', 'category', 'chains', 'tvl_usd', 'change_7d', 'age_days', 'implied_value_usd', 'token_odds', 'verdict', 'deposit_usd', 'net_usd'];
+      const lines = [head.join(',')];
+      for (const r of list) {
+        const v = r.verdict || {};
+        lines.push([r.rank, `"${(r.name || '').replace(/"/g, '""')}"`, r.category || 'Other', `"${(r.chains || []).join(' ')}"`, r.tvl_usd, r.change_7d ?? '', r.age_days ?? '', r.implied_value_usd, r.token_odds ?? '', v.verdict || '', v.deposit_usd ?? '', v.net_usd ?? ''].join(','));
+      }
+      blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+      name = 'radar-board.csv';
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
 
   function sortable(key, label) {
@@ -167,14 +230,18 @@
     ]);
   }
 
+  function verdictPill(v) {
+    return make('span', { class: `pill ${v.verdict}`, text: v.verdict });
+  }
+
   function preTable() {
     const list = orderedRows(filteredRows());
     if (list.length === 0) {
       return make('section', { class: 'panel' }, [
         make('div', { class: 'void' }, [
           make('h2', { text: 'nothing matches' }),
-          make('p', { text: 'Loosen the search or switch the category back to all.' }),
-          make('button', { type: 'button', class: 'btn', onclick: () => { view.query = ''; view.category = 'all'; hashPush(); paint(); } }, ['reset filters'])
+          make('p', { text: 'Loosen the search or switch the filters back to all.' }),
+          make('button', { type: 'button', class: 'btn', onclick: () => { view.query = ''; view.category = 'all'; view.verdict = 'all'; hashPush(); paint(); } }, ['reset filters'])
         ])
       ]);
     }
@@ -195,6 +262,9 @@
           make('div', { class: 'meter', 'aria-hidden': 'true' }, [make('i', { style: `width:${Math.max(2, Math.round((row.implied_value_usd / peak) * 100))}%` })]),
           make('span', { class: 'num', text: money(row.implied_value_usd) })
         ]),
+        make('td', { class: 'odds', text: `${Math.round(row.token_odds * 100)}%` }),
+        make('td', null, [verdictPill(row.verdict)]),
+        make('td', { class: 'num', text: money(row.verdict.net_usd) }),
         make('td', { class: 'tag', text: 'pre-token' })
       ]);
       tr.addEventListener('click', () => openDrawer(row.slug));
@@ -204,7 +274,7 @@
     return make('section', { class: 'panel' }, [
       make('div', { class: 'scroll' }, [
         make('table', null, [
-          make('caption', { class: 'caption', text: 'Pre-token protocols ordered by implied value. Click a row for the score breakdown and the farm plan.' }),
+          make('caption', { class: 'caption', text: 'Pre-token protocols ordered by implied value. Click a row for the score breakdown, peer set, farm verdict and plan.' }),
           make('thead', null, [make('tr', null, [
             sortable('rank', '#'),
             sortable('name', 'Protocol'),
@@ -212,6 +282,9 @@
             sortable('change_7d', '7d'),
             sortable('age_days', 'Age'),
             sortable('implied_value_usd', 'Implied value'),
+            sortable('token_odds', 'Odds'),
+            make('th', { scope: 'col', text: 'Verdict' }),
+            sortable('net_usd', 'Net'),
             make('th', { scope: 'col', text: 'Token' })
           ])]),
           body
@@ -229,19 +302,21 @@
         make('td', { class: 'num', text: money(row.tvl_usd) }),
         make('td', { class: `num ${row.change_7d !== null && row.change_7d >= 0 ? 'up' : 'down'}`, text: pct(row.change_7d) }),
         make('td', { class: 'num', text: money(row.mcap_usd) }),
+        make('td', { class: 'num', text: row.tvl_mcap_ratio === null ? '—' : num2(row.tvl_mcap_ratio) }),
         make('td', { class: 'tag', text: 'trading' })
       ]));
     }
     return make('section', { class: 'panel' }, [
       make('div', { class: 'scroll' }, [
         make('table', null, [
-          make('caption', { class: 'caption', text: 'These protocols already have tokens, so their market cap is a fact rather than a model. They sit outside the pre-token ranking.' }),
+          make('caption', { class: 'caption', text: 'These protocols already have tokens, so their market cap is a fact rather than a model; the TVL/mcap ratio is the empirical spread the implied-value model is fitted against. They sit outside the pre-token ranking.' }),
           make('thead', null, [make('tr', null, [
             make('th', { scope: 'col', text: 'Status' }),
             make('th', { scope: 'col', text: 'Protocol' }),
             make('th', { scope: 'col', text: 'TVL' }),
             make('th', { scope: 'col', text: '7d' }),
             make('th', { scope: 'col', text: 'Market cap' }),
+            make('th', { scope: 'col', text: 'TVL/mcap' }),
             make('th', { scope: 'col', text: 'Token' })
           ])]),
           body
@@ -252,11 +327,19 @@
 
   function modelCard() {
     const p = doc.params;
+    const s = doc.stats;
+    const weights = s.base_weights.slice(0, 10).map(([name, w]) => `${name.replace(/[\\^$*+?.()|[\]{}]/g, '').slice(0, 18)} ${w}`).join('  ·  ');
     return make('section', { class: 'panel model-card' }, [
       make('h2', { text: 'how the score is built' }),
-      make('p', { class: 'caption', text: 'One pure function scores every protocol from the snapshot alone. The category sets a base weight on TVL, a power term keeps giants from dwarfing everything, momentum scales with seven-day TVL change, maturity rewards time survived without a token, and multi-chain presence adds a small diversity bonus.' }),
-      make('code', { class: 'equation', text: `implied = base_weight(category) · (tvl / ${p.tvl_scale})^${p.tvl_exponent} · (1 + clamp(growth, ${p.growth_clamp_lo}, ${p.growth_clamp_hi})/100 · ${p.growth_sensitivity}) · (${p.maturity_floor} + min(age, ${p.maturity_span_days})/${p.maturity_span_days} · ${p.maturity_gain}) · (1 + min(chains · ${p.chain_step}, ${p.chain_cap})) · 10^6` }),
-      make('p', { class: 'caption', text: `Base weights run from ${0.5} for chains down to ${0.03} for canonical bridges; the neutral fallback is ${0.15}. Growth is clamped so a single outlier week cannot dominate, and unknown ages assume ${p.assumed_age_days} days. Nothing here reads a protocol name.` })
+      make('p', { class: 'method', text: 'One multiplicative model scores every protocol from the snapshot alone. The category sets a base weight on TVL, a power term keeps giants from dwarfing everything, a fee curve scales revenue with size, momentum scales with seven-day TVL change, maturity rewards time survived without a token, and multi-chain presence adds a diversity and EVM-deployment bonus.' }),
+      make('code', { class: 'equation', text: `implied = base_weight(category)\n       · (tvl / ${p.tvl_scale})^${p.tvl_exponent}\n       · (${p.fee_floor} + ${p.fee_gain} · log10(tvl/${p.tvl_scale}))\n       · (1 + clamp(growth, ${p.growth_clamp_lo}, ${p.growth_clamp_hi})/100 · ${p.growth_sensitivity})\n       · (${p.maturity_floor} + min(age, ${p.maturity_span_days})/${p.maturity_span_days} · ${p.maturity_gain})\n       · (1 + min(chains · ${p.chain_step}, ${p.chain_cap}) + ${p.evm_bonus}·EVM)\n       · 10^6` }),
+      make('h3', { text: 'out-of-sample check' }),
+      make('p', { class: 'method', text: `The three most sensitive exponents — the TVL power ${p.tvl_exponent}, the fee gain ${p.fee_gain} and the growth sensitivity ${p.growth_sensitivity} — were fitted on one half of the pre-token pool (${s.split_a} protocols) and checked on the other half (${s.split_b}), twice, with the held-out error below the training error. ${s.fitted ? 'The fit holds out of sample.' : 'The pool is too small to fit; the defaults stand.'}` }),
+      make('h3', { text: 'token odds' }),
+      make('p', { class: 'method', text: 'Token odds is a separate claim from the ranking: a logistic base rate over the protocol\'s TVL share, seven-day growth and age, giving the chance a token exists at all within the horizon. It is multiplied into each farm verdict so a high-value protocol with low odds is not over-farmed.' }),
+      make('h3', { text: 'base weights' }),
+      make('p', { class: 'method', text: weights }),
+      make('p', { class: 'method', text: `Base weights run from ${0.5} for chains down to ${0.03} for canonical bridges; the neutral fallback is ${0.15}. Growth is clamped so a single outlier week cannot dominate, and unknown ages assume ${p.assumed_age_days} days. Nothing here reads a protocol name.` })
     ]);
   }
 
@@ -271,6 +354,7 @@
     drawer.setAttribute('aria-hidden', 'false');
     const local = recompute(row);
     const agrees = local === row.implied_value_usd;
+    const v = row.verdict;
     drawer.appendChild(make('div', { class: 'drawer-head' }, [
       make('div', null, [
         make('small', { class: 'kicker', text: `rank ${row.rank} of ${doc.board_count}` }),
@@ -279,12 +363,22 @@
       ]),
       make('button', { type: 'button', class: 'shut', 'aria-label': 'Close details', onclick: () => closeDrawer() }, ['close'])
     ]));
-    drawer.appendChild(make('section', { class: 'drawer-body' }, [
+    const scroll = make('div', { class: 'drawer-scroll' });
+    const grid = make('div', { class: 'drawer-grid' });
+    grid.appendChild(make('section', { class: 'drawer-body' }, [
+      make('h3', { text: 'implied value' }),
+      make('div', { class: 'verdict' }, [
+        make('div', { class: 'row' }, [make('span', { text: 'implied value' }), make('span', { text: moneyFull(row.implied_value_usd) })]),
+        make('div', { class: 'row' }, [make('span', { text: 'token odds' }), make('span', { text: `${Math.round(row.token_odds * 100)}%` })]),
+        make('div', { class: 'row' }, [make('span', { text: 'verdict' }), make('span', { text: v.verdict })]),
+        make('div', { class: 'note', text: v.note })
+      ]),
       make('h3', { text: 'score breakdown' }),
       make('dl', { class: 'equations' }, [
         make('div', null, [make('dt', { text: 'TVL' }), make('dd', { text: money(row.tvl_usd) })]),
         make('div', null, [make('dt', { text: 'base weight' }), make('dd', { text: `${row.breakdown.base_weight} — ${row.breakdown.base_reason}` })]),
         make('div', null, [make('dt', { text: 'TVL term' }), make('dd', { text: String(row.breakdown.tvl_term) })]),
+        make('div', null, [make('dt', { text: 'fee curve' }), make('dd', { text: String(row.breakdown.fee_term) })]),
         make('div', null, [make('dt', { text: 'momentum (7d)' }), make('dd', { text: `${pct(row.change_7d)} → ${row.breakdown.momentum_term}` })]),
         make('div', null, [make('dt', { text: 'maturity' }), make('dd', { text: `${age(row.breakdown.age_days_used)} → ${row.breakdown.maturity_term}` })]),
         make('div', null, [make('dt', { text: 'diversity' }), make('dd', { text: `${row.chains.length} chain(s) → ${row.breakdown.diversity_term}` })]),
@@ -292,10 +386,31 @@
       ]),
       make('p', { class: 'caption', text: agrees ? `The page recomputes this row as ${money(local)} — the same number board.json carries. An estimate, not a price.` : `The page recomputes this row as ${money(local)}, which disagrees with board.json: the data file would be stale.` })
     ]));
-    drawer.appendChild(make('section', { class: 'drawer-body' }, [
+    grid.appendChild(make('section', { class: 'drawer-body' }, [
+      make('h3', { text: 'nearest peers by token trade' }),
+      make('table', { class: 'peers' }, [
+        make('thead', null, [make('tr', null, [make('th', { scope: 'col', text: 'protocol' }), make('th', { scope: 'col', class: 'num', text: 'TVL' }), make('th', { scope: 'col', class: 'num', text: 'mcap' }), make('th', { scope: 'col', class: 'num', text: 'mcap/TVL' })])]),
+        make('tbody', null, row.peers.map((peer) => make('tr', null, [
+          make('td', { text: peer.name }),
+          make('td', { class: 'num', text: money(peer.tvl_usd) }),
+          make('td', { class: 'num', text: money(peer.mcap_usd) }),
+          make('td', { class: 'num', text: String(peer.ratio) })
+        ])))
+      ]),
+      make('h3', { text: 'farm verdict' }),
+      make('div', { class: 'verdict' }, [
+        make('div', { class: 'row' }, [make('span', { text: 'deposit' }), make('span', { text: moneyFull(v.deposit_usd) })]),
+        make('div', { class: 'row' }, [make('span', { text: 'horizon' }), make('span', { text: `${v.horizon_weeks} weeks` })]),
+        make('div', { class: 'row' }, [make('span', { text: 'modelled drop share' }), make('span', { text: `${v.drop_share_pct}%` })]),
+        make('div', { class: 'row' }, [make('span', { text: 'est. value' }), make('span', { text: moneyFull(v.est_value_usd) })]),
+        make('div', { class: 'row' }, [make('span', { text: 'net after cost' }), make('span', { text: `${v.net_usd >= 0 ? '+' : ''}${moneyFull(v.net_usd)}` })]),
+        make('div', { class: 'row' }, [make('span', { text: 'time' }), make('span', { text: `~${v.hours} h over ${v.horizon_weeks} wk` })])
+      ]),
       make('h3', { text: 'farm plan' }),
       make('ol', { class: 'plan' }, row.farm_steps.map((step) => make('li', { text: step })))
     ]));
+    scroll.appendChild(grid);
+    drawer.appendChild(scroll);
     drawer.classList.add('show');
   }
 
@@ -309,7 +424,8 @@
   function paint() {
     stage.innerHTML = '';
     stage.appendChild(masthead());
-    stage.appendChild(summary());
+    stage.appendChild(kpis());
+    stage.appendChild(funnel());
     stage.appendChild(controls());
     stage.appendChild(view.pane === 'pre' ? preTable() : liveTable());
     if (view.pane === 'pre') stage.appendChild(modelCard());
