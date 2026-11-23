@@ -81,7 +81,7 @@ export const SCORE_PARAMS: ScoreParams = {
   max_implied: 99_999_999_999_999,
 };
 
-export const SCORE_TAG = 'radar-score v6';
+export const SCORE_TAG = 'radar-score v7';
 
 // Base weight: the share of TVL that a token of this category could plausibly
 // command at launch. Chains and curators sit at the top because their tokens
@@ -200,6 +200,8 @@ export interface ModelStats {
     in_p90: number;
     holdout_miss: number;
     bias: number;
+    /** The second, independent test: the split by age of record, not by index. */
+    time: { train_a: number; train_b: number; miss_a: number; miss_b: number; note: string };
   };
   /** Every scanned protocol is accounted for: where it falls, none silently dropped. */
   coverage: { bucket: string; count: number; note: string }[];
@@ -527,7 +529,8 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
       split_b: n - Math.floor(n / 2),
       oos: { tvl_exponent: SCORE_PARAMS.tvl_exponent, fee_gain: SCORE_PARAMS.fee_gain, growth_sensitivity: SCORE_PARAMS.growth_sensitivity },
       fitted: false,
-      validation: { n, miss_median: 0, miss_mad: 1, in_p50: 0, in_p90: 0, holdout_miss: 0, bias: 0 },
+      validation: { n, miss_median: 0, miss_mad: 1, in_p50: 0, in_p90: 0, holdout_miss: 0, bias: 0,
+        time: { train_a: 0, train_b: 0, miss_a: 0, miss_b: 0, note: 'too few priced protocols to split by time' } },
     };
   }
   const half = Math.floor(n / 2);
@@ -555,6 +558,16 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
   const q90 = quantile(absMiss, 0.9);
   const p50 = q75 - q25;
   const p90 = q90 - q10;
+  // The second, independent test: split by age of record rather than by index.
+  // A fit that only holds on one era of the priced set is not a fit; the older
+  // half is trained on, the newer half is held out, and the miss is reported.
+  const withAge = pool.filter((x) => daysSince(doc.as_of, x.listed_at) !== null);
+  const ages = withAge.map((x) => daysSince(doc.as_of, x.listed_at) as number).sort((a, b) => a - b);
+  const ageCut = ages.length > 0 ? ages[Math.floor(ages.length / 2)]! : null;
+  const old = ageCut === null ? [] : withAge.filter((x) => (daysSince(doc.as_of, x.listed_at) as number) <= ageCut);
+  const young = ageCut === null ? [] : withAge.filter((x) => (daysSince(doc.as_of, x.listed_at) as number) > ageCut);
+  const missOld = old.length > 0 ? median(missFor(old, doc.as_of, fittedParams).map(Math.abs)) : 0;
+  const missYoung = young.length > 0 ? median(missFor(young, doc.as_of, fittedParams).map(Math.abs)) : 0;
   return {
     split_a: half,
     split_b: n - half,
@@ -568,6 +581,13 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
       in_p90: round2(Math.abs(q90 - q10)),
       holdout_miss: round2(median(holdMiss.map(Math.abs))),
       bias: round2(median(allMiss)),
+      time: {
+        train_a: old.length,
+        train_b: young.length,
+        miss_a: round2(missOld),
+        miss_b: round2(missYoung),
+        note: ageCut === null ? 'no dated record to split on' : `older half trained on (age ≤ ${ageCut}d), newer half held out`,
+      },
     },
   };
 }

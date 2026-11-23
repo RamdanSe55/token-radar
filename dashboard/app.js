@@ -171,7 +171,9 @@ function masthead() {
       { k: 'board rows', v: String(s.board), sub: `${s.below_floor} below floor · ${s.watch} on the watchlist` },
       { k: 'implied value', v: money(impliedSum), sub: `median ${money(s.implied_median_usd)} · sum of the board` },
       { k: 'out-of-sample miss', v: `${v.miss_median.toFixed(2)}×`, sub: `${v.n} priced tokens · holdout ${v.holdout_miss.toFixed(2)}×` },
-      { k: 'range holds', v: `${Math.round(rh.p50 * 100)}%`, sub: `${rh.n} priced · ${Math.round(rh.p90 * 100)}% in the P90 band · bias ${v.bias >= 0 ? '+' : ''}${v.bias.toFixed(2)}×` }
+      { k: 'range holds', v: `${Math.round(rh.p50 * 100)}%`, sub: `${rh.n} priced · ${Math.round(rh.p90 * 100)}% in the P90 band · bias ${v.bias >= 0 ? '+' : ''}${v.bias.toFixed(2)}×` },
+      { k: 'held out by age', v: `${v.time.miss_b.toFixed(2)}×`, sub: `${v.time.train_a} older trained · ${v.time.train_b} newer held out` },
+      { k: 'integrity', v: `${s.integrity.filter((i) => i.ok).length}/${s.integrity.length}`, sub: `${s.coverage.length} buckets · ${s.protocols} protocols accounted` }
     ];
     return make('section', { class: 'kpis' }, items.map((it) => make('div', { class: 'kpi' }, [
       make('dt', { text: it.k }),
@@ -503,13 +505,14 @@ function masthead() {
        · (1 + min(chains · ${p.chain_step}, ${p.chain_cap}) + ${p.evm_bonus} · EVM)
        · 10^6` }),
       make('h3', { text: 'fitted, then held out — the out-of-sample check' }),
-      make('p', { class: 'method', text: `The three most sensitive exponents — TVL power ${p.tvl_exponent}, fee gain ${p.fee_gain}, growth sensitivity ${p.growth_sensitivity} — were chosen on ${s.split_a} priced protocols and checked on ${s.split_b} others the fit never saw. The held-out miss ${v.holdout_miss.toFixed(2)}× is below the training miss ${v.miss_median.toFixed(2)}×, so the fit holds out of sample rather than memorising. The miss is the median ratio between a protocol's real market cap and the model's value for it.` }),
+      make('p', { class: 'method', text: `The three most sensitive exponents — TVL power ${p.tvl_exponent}, fee gain ${p.fee_gain}, growth sensitivity ${p.growth_sensitivity} — were chosen on ${s.split_a} priced protocols and checked on ${s.split_b} others the fit never saw. The held-out miss ${v.holdout_miss.toFixed(2)}× is below the training miss ${v.miss_median.toFixed(2)}×, so the fit holds out of sample rather than memorising. The same curve is then held out a second time by age of record: ${v.time.train_a} older protocols are trained on, ${v.time.train_b} newer ones held out, and the miss moves ${v.time.miss_a.toFixed(2)}× → ${v.time.miss_b.toFixed(2)}×. The miss is the median ratio between a protocol's real market cap and the model's value for it.` }),
       make('table', { class: 'oos' }, [
         make('thead', null, [make('tr', null, [make('th', { scope: 'col', text: 'check' }), make('th', { scope: 'col', class: 'num', text: 'value' }), make('th', { scope: 'col', class: 'num', text: 'reads' })])]),
         make('tbody', null, [
           make('tr', null, [make('td', { text: 'priced protocols' }), make('td', { class: 'num', text: String(v.n) }), make('td', { class: 'num', text: `${s.split_a} train · ${s.split_b} held out` })]),
           make('tr', null, [make('td', { text: 'training miss' }), make('td', { class: 'num', text: `${v.miss_median.toFixed(2)}×` }), make('td', { class: 'num', text: 'median |log ratio|' })]),
           make('tr', null, [make('td', { text: 'held-out miss' }), make('td', { class: 'num', text: `${v.holdout_miss.toFixed(2)}×` }), make('td', { class: 'num', text: 'never seen by the fit' })]),
+          make('tr', null, [make('td', { text: 'held out by age' }), make('td', { class: 'num', text: `${v.time.miss_a.toFixed(2)}× → ${v.time.miss_b.toFixed(2)}×` }), make('td', { class: 'num', text: `${v.time.train_a} older · ${v.time.train_b} newer · ${v.time.note}` })]),
           make('tr', null, [make('td', { text: 'bias' }), make('td', { class: 'num', text: `${v.bias >= 0 ? '+' : ''}${v.bias.toFixed(2)}×` }), make('td', { class: 'num', text: 'positive = undervalues' })]),
           holdRow('p50', 'inside P50 band'),
           holdRow('p90', 'inside P90 band')
