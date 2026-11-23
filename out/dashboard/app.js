@@ -62,7 +62,7 @@
   function recompute(row) {
     const p = doc.scored_params || doc.params;
     const b = row.breakdown;
-    const tvlTerm = Math.pow(row.tvl_usd / p.tvl_scale, p.tvl_exponent);
+    const tvlTerm = Math.pow(row.tvl_usd / p.tvl_scale, b.tvl_exponent ?? p.tvl_exponent);
     const decades = Math.log10(Math.max(row.tvl_usd, 1) / p.tvl_scale);
     const fee = p.fee_floor + p.fee_gain * Math.min(Math.max(decades, 0), 6);
     const momentum = Math.max(0.2, 1 + (b.growth_used_pct / 100) * p.growth_sensitivity);
@@ -97,7 +97,6 @@
       if (view.tab === 'keep' && row.verdict.verdict !== 'keep') return false;
       if (view.tab === 'marginal' && row.verdict.verdict !== 'marginal') return false;
       if (view.tab === 'pass' && row.verdict.verdict !== 'pass') return false;
-      if (view.tab === 'rate' && row.verdict.net_per_hour_usd < 15) return false;
       if (view.category !== 'all' && (row.category || 'Other') !== view.category) return false;
       if (view.verdict !== 'all' && row.verdict.verdict !== view.verdict) return false;
       if (!needle) return true;
@@ -119,7 +118,6 @@
       else if (k === 'age_days') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else if (k === 'token_odds') { av = a.token_odds; bv = b.token_odds; }
       else if (k === 'net_usd') { av = a.verdict.net_usd; bv = b.verdict.net_usd; }
-      else if (k === 'rate') { av = a.verdict.net_per_hour_usd; bv = b.verdict.net_per_hour_usd; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -d;
       if (av > bv) return d;
@@ -176,10 +174,9 @@ function masthead() {
       { k: 'range holds', v: `${Math.round(rh.p50 * 100)}%`, sub: `${rh.n} priced · ${Math.round(rh.p90 * 100)}% in the P90 band · bias ${v.bias >= 0 ? '+' : ''}${v.bias.toFixed(2)}×` },
       { k: 'held out by age', v: `${v.time.miss_b.toFixed(2)}×`, sub: `${v.time.train_a} older trained · ${v.time.train_b} newer held out` },
       { k: 'walk-forward worst', v: `${v.walk.worst.toFixed(2)}×`, sub: `${v.walk.windows.length} windows · past trains, next tests` },
+      { k: 'leave-one-out', v: `${v.loo.miss.toFixed(2)}×`, sub: `each of ${v.loo.n} scored by the other ${v.loo.n - 1}` },
       { k: 'terms kept', v: `${v.terms.filter((x) => x.kept).length}/${v.terms.length}`, sub: 'blind test, dropped where it does not earn its place' },
-      { k: 'integrity', v: `${s.integrity.filter((i) => i.ok).length}/${s.integrity.length}`, sub: `${s.coverage.length} buckets · ${s.protocols} protocols accounted` },
-      { k: 'farm net', v: money(s.farm_net_usd), sub: `${s.farm_keep} keep · ${s.farm_marginal} marginal · ${s.farm_pass} pass` },
-      { k: 'median $/h', v: `$${s.farm_median_rate.toFixed(0)}`, sub: 'net ÷ hours over the keep set' }
+      { k: 'integrity', v: `${s.integrity.filter((i) => i.ok).length}/${s.integrity.length}`, sub: `${s.coverage.length} buckets · ${s.protocols} protocols accounted` }
     ];
     return make('section', { class: 'kpis' }, items.map((it) => make('div', { class: 'kpi' }, [
       make('dt', { text: it.k }),
@@ -235,8 +232,7 @@ function masthead() {
       { id: 'below', label: `Below floor ${below}` },
       { id: 'keep', label: `Keep ${farm}` },
       { id: 'marginal', label: `Marginal ${marginal}` },
-      { id: 'pass', label: `Skip ${skip}` },
-      { id: 'rate', label: `Best $/h` }
+      { id: 'pass', label: `Skip ${skip}` }
     ];
     const tabRow = make('div', { class: 'tab-row count-row' }, tabDefs.map((t) => make('button', {
       type: 'button', class: view.tab === t.id ? 'tab on' : 'tab', 'aria-pressed': String(view.tab === t.id),
@@ -262,11 +258,11 @@ function masthead() {
       blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
       name = 'radar-board.json';
     } else {
-      const head = ['rank', 'protocol', 'category', 'chains', 'tvl_usd', 'change_7d', 'age_days', 'implied_value_usd', 'token_odds', 'verdict', 'deposit_usd', 'net_usd', 'net_per_hour_usd', 'hours'];
+      const head = ['rank', 'protocol', 'category', 'chains', 'tvl_usd', 'change_7d', 'age_days', 'implied_value_usd', 'token_odds', 'verdict', 'deposit_usd', 'net_usd'];
       const lines = [head.join(',')];
       for (const r of list) {
         const v = r.verdict || {};
-        lines.push([r.rank, `"${(r.name || '').replace(/"/g, '""')}"`, r.category || 'Other', `"${(r.chains || []).join(' ')}"`, r.tvl_usd, r.change_7d ?? '', r.age_days ?? '', r.implied_value_usd, r.token_odds ?? '', v.verdict || '', v.deposit_usd ?? '', v.net_usd ?? '', v.net_per_hour_usd ?? '', v.hours ?? ''].join(','));
+        lines.push([r.rank, `"${(r.name || '').replace(/"/g, '""')}"`, r.category || 'Other', `"${(r.chains || []).join(' ')}"`, r.tvl_usd, r.change_7d ?? '', r.age_days ?? '', r.implied_value_usd, r.token_odds ?? '', v.verdict || '', v.deposit_usd ?? '', v.net_usd ?? ''].join(','));
       }
       blob = new Blob([lines.join('\n')], { type: 'text/csv' });
       name = 'radar-board.csv';
@@ -331,8 +327,6 @@ function masthead() {
         ]),
         make('td', { class: 'odds', text: `${Math.round(row.token_odds * 100)}%` }),
         make('td', null, [verdictPill(row.verdict)]),
-        make('td', { class: `num ${row.verdict.net_usd >= 0 ? 'up' : 'down'}`, text: `${row.verdict.net_usd >= 0 ? '+' : '−'}${money(Math.abs(row.verdict.net_usd))}` }),
-        make('td', { class: `num ${row.verdict.net_per_hour_usd >= 0 ? 'up' : 'down'}`, text: `$${Math.round(row.verdict.net_per_hour_usd)}` }),
         make('td', { class: 'tag', text: 'pre-token' })
         ]);
       tr.addEventListener('click', () => openDrawer(row.slug));
@@ -354,7 +348,6 @@ function masthead() {
             sortable('token_odds', 'Odds'),
             make('th', { scope: 'col', text: 'Verdict' }),
             sortable('net_usd', 'Net'),
-            sortable('rate', '$ / h'),
             make('th', { scope: 'col', text: 'Token' })
           ])]),
           body
@@ -429,7 +422,7 @@ function masthead() {
       make('dl', { class: 'equations' }, [
         make('div', null, [make('dt', { text: 'TVL' }), make('dd', { text: money(row.tvl_usd) })]),
         make('div', null, [make('dt', { text: 'base weight' }), make('dd', { text: `${row.breakdown.base_weight} — ${row.breakdown.base_reason}` })]),
-        make('div', null, [make('dt', { text: 'TVL term' }), make('dd', { text: String(row.breakdown.tvl_term) })]),
+        make('div', null, [make('dt', { text: 'TVL term' }), make('dd', { text: `${String(row.breakdown.tvl_term)} (exponent ${row.breakdown.tvl_exponent})` })]),
         make('div', null, [make('dt', { text: 'fee curve' }), make('dd', { text: String(row.breakdown.fee_term) })]),
         make('div', null, [make('dt', { text: 'momentum (7d)' }), make('dd', { text: `${pct(row.change_7d)} → ${row.breakdown.momentum_term}` })]),
         make('div', null, [make('dt', { text: 'maturity' }), make('dd', { text: `${age(row.breakdown.age_days_used)} → ${row.breakdown.maturity_term}` })]),
@@ -456,9 +449,7 @@ function masthead() {
         make('div', { class: 'row' }, [make('span', { text: 'modelled drop share' }), make('span', { text: `${v.drop_share_pct}%` })]),
         make('div', { class: 'row' }, [make('span', { text: 'est. value' }), make('span', { text: moneyFull(v.est_value_usd) })]),
         make('div', { class: 'row' }, [make('span', { text: 'net after cost' }), make('span', { text: `${v.net_usd >= 0 ? '+' : ''}${moneyFull(v.net_usd)}` })]),
-        make('div', { class: 'row' }, [make('span', { text: 'net per hour' }), make('span', { text: `${v.net_per_hour_usd >= 0 ? '+' : ''}$${v.net_per_hour_usd.toFixed(0)}/h` })]),
-        make('div', { class: 'row' }, [make('span', { text: 'time' }), make('span', { text: `~${v.hours} h over ${v.horizon_weeks} wk` })]),
-        make('div', { class: 'note', text: `verdict rule: keep needs a positive net and at least $15/h of time` })
+        make('div', { class: 'row' }, [make('span', { text: 'time' }), make('span', { text: `~${v.hours} h over ${v.horizon_weeks} wk` })])
       ]),
       make('h3', { text: 'farm plan' }),
       make('ol', { class: 'plan' }, row.farm_steps.map((step) => make('li', { text: step })))
@@ -528,6 +519,7 @@ function masthead() {
           make('tr', null, [make('td', { text: 'held-out miss' }), make('td', { class: 'num', text: `${v.holdout_miss.toFixed(2)}×` }), make('td', { class: 'num', text: 'never seen by the fit' })]),
           make('tr', null, [make('td', { text: 'held out by age' }), make('td', { class: 'num', text: `${v.time.miss_a.toFixed(2)}× → ${v.time.miss_b.toFixed(2)}×` }), make('td', { class: 'num', text: `${v.time.train_a} older · ${v.time.train_b} newer · ${v.time.note}` })]),
           make('tr', null, [make('td', { text: 'walk-forward worst' }), make('td', { class: 'num', text: `${v.walk.worst.toFixed(2)}×` }), make('td', { class: 'num', text: v.walk.note })]),
+          make('tr', null, [make('td', { text: 'leave-one-out' }), make('td', { class: 'num', text: `${v.loo.miss.toFixed(2)}×` }), make('td', { class: 'num', text: v.loo.note })]),
           make('tr', null, [make('td', { text: 'bias' }), make('td', { class: 'num', text: `${v.bias >= 0 ? '+' : ''}${v.bias.toFixed(2)}×` }), make('td', { class: 'num', text: 'positive = undervalues' })]),
           holdRow('p50', 'inside P50 band'),
           holdRow('p90', 'inside P90 band')
@@ -560,6 +552,24 @@ function masthead() {
           ])
         ))
       ]),
+      make('h3', { text: 'each category, its own size exponent' }),
+      make('p', { class: 'method', text: `A lending book and a bridge do not scale with TVL the same way, so the global power ${p.tvl_exponent} is too coarse. Every category with enough priced peers has its exponent fitted on the training half alone and kept only where it lowers that category's held-out miss; the rest share the global curve. ${v.cat.filter((c) => c.kept).length} of ${v.cat.length} categories earned a bespoke exponent.` }),
+      make('table', { class: 'oos' }, [
+        make('thead', null, [make('tr', null, [make('th', { scope: 'col', text: 'category' }), make('th', { scope: 'col', class: 'num', text: 'peers' }), make('th', { scope: 'col', class: 'num', text: 'held out' }), make('th', { scope: 'col', class: 'num', text: 'exponent' }), make('th', { scope: 'col', class: 'num', text: 'global' }), make('th', { scope: 'col', class: 'num', text: 'miss global' }), make('th', { scope: 'col', class: 'num', text: 'miss cat' }), make('th', { scope: 'col', class: 'num', text: 'gain' }), make('th', { scope: 'col', text: 'kept' })])]),
+        make('tbody', null, (v.cat.length > 0 ? v.cat : [{ key: 'none', name: 'none', n: 0, n_hold: 0, exponent: p.tvl_exponent, global: p.tvl_exponent, miss_global: 0, miss_cat: 0, delta: 0, kept: false }]).map((c) =>
+          make('tr', null, [
+            make('td', { text: c.name }),
+            make('td', { class: 'num', text: String(c.n) }),
+            make('td', { class: 'num', text: String(c.n_hold) }),
+            make('td', { class: 'num', text: String(c.exponent) }),
+            make('td', { class: 'num', text: String(c.global) }),
+            make('td', { class: 'num', text: `${c.miss_global.toFixed(2)}×` }),
+            make('td', { class: 'num', text: `${c.miss_cat.toFixed(2)}×` }),
+            make('td', { class: 'num', text: `${c.delta >= 0 ? '+' : ''}${c.delta.toFixed(2)}×` }),
+            make('td', { text: c.kept ? 'kept' : 'shared', class: c.kept ? 'ok' : 'dim' })
+          ])
+        ))
+      ]),
       make('h3', { text: 'a printed range, honestly' }),
       make('p', { class: 'method', text: `Every row carries a P50 band (the model's ±1 MAD, about ${Math.exp(v.miss_mad).toFixed(2)}×) and a wider P90 band (±1.6449 MAD, about ${Math.exp(1.6449 * v.miss_mad).toFixed(2)}×). On the ${rh.n} priced protocols the P50 band holds ${Math.round(rh.p50 * 100)}% and the P90 band ${Math.round(rh.p90 * 100)}% — the ranges are reported, not tuned to look tight.` }),
       make('h3', { text: 'token odds, a separate claim' }),
@@ -567,31 +577,6 @@ function masthead() {
       make('h3', { text: 'base weights' }),
       make('p', { class: 'method', text: weights }),
       make('p', { class: 'method', text: `Growth is clamped so one outlier week cannot dominate; unknown ages assume ${p.assumed_age_days} days. The board is a floor, never a ceiling: ${s.below_floor} protocols below the floor are ranked too.` })
-    ]);
-  }
-
-  function farmEconomics() {
-    const s = doc.stats;
-    const keep = doc.rows.filter((r) => r.verdict.verdict === 'keep');
-    const top = keep.slice().sort((a, b) => b.verdict.net_per_hour_usd - a.verdict.net_per_hour_usd).slice(0, 10);
-    const rows = (top.length > 0 ? top : keep).map((r) => {
-      const v = r.verdict;
-      const rate = Math.max(0, v.net_per_hour_usd);
-      const peak = Math.max(1, ...(top.length > 0 ? top : keep).map((x) => x.verdict.net_per_hour_usd));
-      return make('div', { class: 'farm-row' }, [
-        make('span', { class: 'farm-rank', text: `#${r.rank}` }),
-        make('span', { class: 'farm-name', text: r.name }),
-        make('span', { class: 'farm-money', text: money(v.deposit_usd) }),
-        make('div', { class: 'meter slim', 'aria-hidden': 'true' }, [make('i', { style: `width:${Math.max(2, Math.round((rate / peak) * 100))}%` })]),
-        make('span', { class: `farm-rate ${v.net_per_hour_usd >= 15 ? 'up' : 'down'}`, text: `$${Math.round(v.net_per_hour_usd)}/h` }),
-        make('span', { class: 'farm-net', text: `${v.net_usd >= 0 ? '+' : '−'}${money(Math.abs(v.net_usd))}` })
-      ]);
-    });
-    const median = s.farm_median_rate;
-    return make('section', { class: 'panel farm' }, [
-      make('h2', { text: 'farm economics — what the keep set pays' }),
-      make('p', { class: 'method', text: `A farm is priced, not praised: implied value × modelled drop share × token odds, less the deposit and gas, divided by the hours the position asks for. The bar is keep = a positive net and at least $15/h of time. Of ${s.board} ranked rows, ${s.farm_keep} clear it, ${s.farm_marginal} are marginal and ${s.farm_pass} do not pay for their own time; the keep set's median is $${median.toFixed(0)}/h on ${money(s.farm_net_usd)} net.` }),
-      make('div', { class: 'farm-grid' }, rows)
     ]);
   }
 
@@ -604,7 +589,6 @@ function masthead() {
     stage.appendChild(controls());
     stage.appendChild(view.pane === 'pre' ? preTable() : liveTable());
     if (view.pane === 'pre') stage.appendChild(method());
-    if (view.pane === 'pre') stage.appendChild(farmEconomics());
     stage.appendChild(drawer);
     if (view.openSlug) openDrawer(view.openSlug);
   }

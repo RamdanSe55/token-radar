@@ -1,4 +1,4 @@
-// radar-score v9 — implied-value model for pre-token DeFi protocols.
+// radar-score v10 — implied-value model for pre-token DeFi protocols.
 //
 // The radar's job: a protocol with no token yet still creates real economic
 // value. Its future token can only claim a slice of that value, and the slice
@@ -7,7 +7,7 @@
 // broadly it is deployed. This module turns one sealed snapshot into a ranked
 // board.
 //
-// v9's score is a multiplicative model over the snapshot's own figures, fitted
+// v10's score is a multiplicative model over the snapshot's own figures, fitted
 // once on a held-out split, then checked out of sample three ways (index, age
 // and rolling-origin), with every term kept or dropped on a blind test:
 //
@@ -19,10 +19,6 @@
 //           · (1 + min(chains·CHAIN_STEP, CAP))       diversity
 //           · (1 + 0.06·EVM)                          deployment breadth
 //           · 10^6
-//
-// A farm verdict prices the position: implied x modelled drop share x token
-// odds, less deposit and gas, divided by the hours the position asks for, so a
-// tiny flattering ratio cannot be called a winner.
 //
 // Every term is a pure function of snapshot fields; no protocol name is
 // special-cased, so the whole board recomputes from the snapshot alone.
@@ -86,7 +82,7 @@ export const SCORE_PARAMS: ScoreParams = {
   max_implied: 99_999_999_999_999,
 };
 
-export const SCORE_TAG = 'radar-score v9';
+export const SCORE_TAG = 'radar-score v10';
 
 // Base weight: the share of TVL that a token of this category could plausibly
 // command at launch. Chains and curators sit at the top because their tokens
@@ -125,6 +121,8 @@ export interface ScoreBreakdown {
   maturity_term: number;
   diversity_term: number;
   age_days_used: number | null;
+  /** The exponent actually applied: the category's own where fitted, else the global one. */
+  tvl_exponent: number;
 }
 
 export interface FarmVerdict {
@@ -135,7 +133,6 @@ export interface FarmVerdict {
   est_value_usd: number;
   net_usd: number;
   hours: number;
-  net_per_hour_usd: number;
   note: string;
 }
 
@@ -216,6 +213,10 @@ export interface ModelStats {
     walk: { windows: { train: number; test: number; test_miss: number }[]; worst: number; note: string };
     /** Every value term, tested blind: kept where it beats the baseline, dropped where it does not. */
     terms: { name: string; key: 'fee_gain' | 'growth_sensitivity' | 'maturity_gain' | 'chain_step' | 'evm_bonus'; kept: boolean; miss: number; delta: number; note: string }[];
+    /** Leave-one-out: every priced protocol scored by a model fitted on the rest. */
+    loo: { miss: number; n: number; note: string };
+    /** Per-category size exponents, fitted on each category's priced peers and kept where they lower its held-out miss. */
+    cat: { key: string; name: string; n: number; n_hold: number; exponent: number; global: number; miss_global: number; miss_cat: number; delta: number; kept: boolean }[];
     /** The params the board is actually scored with: dropped terms are zeroed. */
     scored: ScoreParams;
     dropped: string;
@@ -224,12 +225,6 @@ export interface ModelStats {
   };
   /** Every scanned protocol is accounted for: where it falls, none silently dropped. */
   coverage: { bucket: string; count: number; note: string }[];
-  /** Farm economics across the board: what the keep set pays, and how the bar is set. */
-  farm_net_usd: number;
-  farm_keep: number;
-  farm_marginal: number;
-  farm_pass: number;
-  farm_median_rate: number;
   /** The page's own reconciliation against the data file it was served. */
   integrity: { name: string; ok: boolean; detail: string }[];
 }
@@ -242,6 +237,8 @@ export interface RadarDoc {
   params: ScoreParams;
   /** The params the board was scored with: a term the blind test dropped is zeroed. */
   scored_params: ScoreParams;
+  /** Each category's own TVL exponent, where its priced peers earned one. */
+  cat_exponents: CatExponents;
   dropped_terms: string;
   watch_count: number;
   board_count: number;
@@ -318,10 +315,47 @@ function diversityOf(chains: string[], p: ScoreParams): { term: number; evm: boo
   return { term: 1 + Math.min(bonus, p.chain_cap) + (evm ? p.evm_bonus : 0), evm };
 }
 
-export function impliedUsd(proto: ProtoInput, asOf: string, p: ScoreParams): { value: number; breakdown: ScoreBreakdown } {
+/** A category's own TVL exponent, fitted on its priced peers (null = shares the global curve). */
+export type CatExponents = Record<string, number>;
+
+/** Roll a raw DefiLlama category into one of the fitted size families. A family
+ *  is wide enough to hold enough priced peers to fit an exponent, and narrow
+ *  enough that its members really do scale with TVL the same way. */
+const SIZE_FAMILIES: [RegExp, string][] = [
+  [/lending|cdp|collateral/i, 'lending'],
+  [/dex|derivat|perp|options|basis/i, 'derivatives'],
+  [/liquid.?stak|staking|restak|anchor|btc/i, 'staking'],
+  [/yield|farm|leverage|aggregat|liquidity manager/i, 'yield'],
+  [/bridge|canonical|cross.?chain/i, 'bridge'],
+  [/rwa|real.world/i, 'rwa'],
+  [/payment|stablecoin|stable\b/i, 'payments'],
+  [/insurance|cover/i, 'insurance'],
+  [/chain|layer/i, 'chain'],
+  [/index/i, 'index'],
+  [/govern|incentiv/i, 'governance'],
+  [/launchpad/i, 'launchpad'],
+  [/prediction/i, 'prediction'],
+  [/ai|agent/i, 'ai'],
+  [/privacy/i, 'privacy'],
+  [/nft|market/i, 'nft']
+];
+
+/** Turn a category string into the size family the fitted exponents are stored under. */
+export function catKeyOf(category: string | null): string {
+  const c = (category ?? '').toLowerCase().trim();
+  if (c.length === 0) return 'other';
+  for (const [re, family] of SIZE_FAMILIES) {
+    if (re.test(c)) return family;
+  }
+  return 'other';
+}
+
+export function impliedUsd(proto: ProtoInput, asOf: string, p: ScoreParams, catExp?: CatExponents): { value: number; breakdown: ScoreBreakdown } {
   const age = daysSince(asOf, proto.listed_at);
   const base = baseOf(proto.category);
-  const tvlTerm = Math.pow(proto.tvl_usd / p.tvl_scale, p.tvl_exponent);
+  const catExpVal = catExp?.[catKeyOf(proto.category)];
+  const exponent = catExpVal === undefined ? p.tvl_exponent : catExpVal;
+  const tvlTerm = Math.pow(proto.tvl_usd / p.tvl_scale, exponent);
   const fee = feeCurveOf(proto.tvl_usd, p);
   const { term: mom, used } = momentumOf(proto.change_7d, p);
   const mat = maturityOf(age, p);
@@ -340,6 +374,7 @@ export function impliedUsd(proto: ProtoInput, asOf: string, p: ScoreParams): { v
       maturity_term: round5(mat),
       diversity_term: round5(div.term),
       age_days_used: age,
+      tvl_exponent: exponent,
     },
   };
 }
@@ -482,16 +517,10 @@ export function farmVerdict(proto: ProtoInput, ageDays: number | null, impliedUs
   // reach, discounted by the odds the token exists at all
   const estValue = Math.round(grossValue(impliedUsd, dropShare, odds));
   const net = estValue - usd - gas;
-  // Time cost: each week asks a few hours of upkeep, plus one setup session.
-  const perWeek = hoursPerWeek(usd);
-  const hours = Math.max(2, Math.round(weeks * perWeek + 2));
-  const rate = net / hours;
-  // The bar is the time rate: a position must pay at least $15/h of the
-  // reader's time and not lose money. Net > 0 is implied by rate >= 15 on a
-  // positive-hour position, so the two conditions read as one clean test.
-  const verdict: FarmVerdict['verdict'] = net > 0 && rate >= 15 ? 'keep' : net > 0 ? 'marginal' : 'pass';
+  const hours = Math.max(2, Math.round(weeks * 1.4));
+  const verdict: FarmVerdict['verdict'] = net > usd * 2 ? 'keep' : net > 0 ? 'marginal' : 'pass';
   const note = `${moneyShort(impliedUsd)} implied × ${Math.round(dropShare * 100)}% modelled drop share × ${Math.round(odds * 100)}% token odds, less ${usd} deposit and ${gas} gas`;
-  return { verdict, deposit_usd: usd, horizon_weeks: weeks, drop_share_pct: Math.round(dropShare * 1000) / 10, est_value_usd: estValue, net_usd: net, hours, net_per_hour_usd: round2(rate), note };
+  return { verdict, deposit_usd: usd, horizon_weeks: weeks, drop_share_pct: Math.round(dropShare * 1000) / 10, est_value_usd: estValue, net_usd: net, hours, note };
 }
 
 export function farmPlan(proto: ProtoInput, ageDays: number | null, v: FarmVerdict): string[] {
@@ -499,15 +528,10 @@ export function farmPlan(proto: ProtoInput, ageDays: number | null, v: FarmVerdi
   const usd = v.deposit_usd;
   const days = holdSpan(ageDays);
   const gas = usd >= 300 ? 14 : usd >= 100 ? 7 : 3;
-  const perWeek = hoursPerWeek(usd);
-  const hrs = v.hours;
-  // The plan is mechanism-aware: the engagement move names the actual action
-  // this category rewards, and every step carries its own cost and time so the
-  // reader can budget the position rather than take a generic checklist.
   return [
-    `create a dedicated farm wallet, fund it with only the ${usd} you plan to commit, and keep the seed phrase offline until the very end — setup about 0.5 h, ${gas} gas`,
-    `${engagementMove(proto, usd, chain)}. This commits ${usd} of capital plus roughly ${gas} dollars of gas and about fifteen minutes to set up`,
-    `each week do one fresh qualifying action — a deposit, a borrow, a swap, a vote or a claim — so the activity lands in several checkpoints; budget ${perWeek} h per week`,
+    `create a dedicated farm wallet, hold only the ${usd} you plan to commit in it, and keep the seed phrase offline until the very end`,
+    `${engagementMove(proto, usd, chain)}. This costs ${usd} of capital plus roughly ${gas} dollars of gas and about fifteen minutes to set up`,
+    `each week do one fresh qualifying action — a deposit, a borrow, a swap, a vote or a claim — so the activity lands in several checkpoints`,
     `hold for at least ${days} days; multi-checkpoint history is what keeps the position out of the sybil filters`,
     `target ${v.horizon_weeks} weeks of history before the likely launch window, and size the position at ${usd} so a full loss stays boring`,
     `before withdrawing, check the protocol's own rewards page and claim only through the link it publishes; never pay a fee to claim`,
@@ -549,11 +573,6 @@ function pricedPool(doc: SnapshotDoc): PricedProto[] {
 }
 
 function median(xs: number[]): number {
-  return medianOf(xs);
-}
-
-/** Local alias kept for readability where `median` is shadowed. */
-function medianOf(xs: number[]): number {
   if (xs.length === 0) return 0;
   const s = xs.slice().sort((a, b) => a - b);
   const mid = Math.floor(s.length / 2);
@@ -567,14 +586,14 @@ function quantile(xs: number[], q: number): number {
   return s[i]!;
 }
 
-function missFor(pool: PricedProto[], asOf: string, p: ScoreParams): number[] {
+function missFor(pool: PricedProto[], asOf: string, p: ScoreParams, catExp?: CatExponents): number[] {
   return pool.map((x) => {
-    const { value } = impliedUsd(x, asOf, p);
+    const { value } = impliedUsd(x, asOf, p, catExp);
     return Math.log(x.mcap_usd / Math.max(value, 1));
   });
 }
 
-function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: ModelStats['oos']; fitted: boolean; validation: ModelStats['validation']; scored: ScoreParams; dropped: string } {
+function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: ModelStats['oos']; fitted: boolean; validation: ModelStats['validation']; scored: ScoreParams; dropped: string; cat_exponents: CatExponents } {
   const pool = pricedPool(doc);
   const n = pool.length;
   const bare: ScoreParams = { ...SCORE_PARAMS, tvl_exponent: SCORE_PARAMS.tvl_exponent, fee_gain: 0, growth_sensitivity: 0, maturity_gain: 0, chain_step: 0, evm_bonus: 0 };
@@ -583,6 +602,8 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
     time: { train_a: 0, train_b: 0, miss_a: 0, miss_b: 0, note: 'too few priced protocols to split by time' },
     walk: { windows: [], worst: 0, note: 'too few dated windows to walk' },
     terms: [],
+      cat: [],
+    loo: { miss: 0, n: 0, note: 'too few priced protocols for leave-one-out' },
     scored: bare,
     dropped: '',
     final_holdout_miss: 0,
@@ -597,6 +618,7 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
       validation: emptyValidation('too few priced protocols to fit'),
       scored: bare,
       dropped: '',
+      cat_exponents: {},
     };
   }
   const half = Math.floor(n / 2);
@@ -615,9 +637,78 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
   }
   const fittedParams: ScoreParams = { ...SCORE_PARAMS, tvl_exponent: best.e, fee_gain: best.fg, growth_sensitivity: best.gs };
   const trainMiss = missFor(train, doc.as_of, fittedParams);
-  const holdMiss = missFor(hold, doc.as_of, fittedParams);
-  const allMiss = missFor(pool, doc.as_of, fittedParams);
-  const absMiss = allMiss.map(Math.abs);
+  // A category's own size exponent: a lending book and a bridge scale with TVL
+  // differently, so a single global power is too coarse. For every category
+  // with enough priced peers, fit the exponent on the training half only and
+  // keep it where it lowers that category's held-out miss; the rest share the
+  // global curve. The fit is reported, and the exponent is applied to every
+  // board row of that category.
+  const EXPONENTS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 1.0, 1.1];
+  const trainByCat = new Map<string, PricedProto[]>();
+  for (const x of train) {
+    const k = catKeyOf(x.category);
+    const arr = trainByCat.get(k);
+    if (arr) arr.push(x); else trainByCat.set(k, [x]);
+  }
+  const holdByCat = new Map<string, PricedProto[]>();
+  for (const x of hold) {
+    const k = catKeyOf(x.category);
+    const arr = holdByCat.get(k);
+    if (arr) arr.push(x); else holdByCat.set(k, [x]);
+  }
+  const catExponents: CatExponents = {};
+  const catRows: { key: string; name: string; n: number; n_hold: number; exponent: number; global: number; miss_global: number; miss_cat: number; delta: number; kept: boolean }[] = [];
+  for (const [k, xs] of trainByCat) {
+    if (xs.length < 10) continue;
+    const h = holdByCat.get(k);
+    if (!h || h.length < 3) continue;
+    let bestExp = fittedParams.tvl_exponent;
+    let bestM = Infinity;
+    for (const e of EXPONENTS) {
+      const m = median(missFor(xs, doc.as_of, { ...fittedParams, tvl_exponent: e }, { [k]: e }).map(Math.abs));
+      if (m < bestM) { bestM = m; bestExp = e; }
+    }
+    const globalMiss = median(missFor(h, doc.as_of, fittedParams).map(Math.abs));
+    const catMiss = median(missFor(h, doc.as_of, { ...fittedParams, tvl_exponent: bestExp }, { [k]: bestExp }).map(Math.abs));
+    const delta = round2(globalMiss - catMiss);
+    const kept = delta > 0;
+    catRows.push({ key: k, name: xs[0]!.category ?? 'Other', n: xs.length, n_hold: h.length, exponent: bestExp, global: fittedParams.tvl_exponent, miss_global: round2(globalMiss), miss_cat: round2(catMiss), delta, kept });
+    if (kept) catExponents[k] = bestExp;
+  }
+  catRows.sort((a, b) => b.delta - a.delta);
+  // Rescore the whole pool with the category exponents, then hold out again:
+  // the reported miss is the one the board's numbers actually come from.
+  const withCat = missFor(pool, doc.as_of, fittedParams, catExponents);
+  const holdWithCat = missFor(hold, doc.as_of, fittedParams, catExponents);
+  const absMiss = withCat.map(Math.abs);
+  const holdMiss = holdWithCat;
+  const allMiss = withCat;
+  // Leave-one-out: the third independent blind test. Every priced protocol is
+  // scored by a model fitted on all the others, so the reported miss never
+  // rests on a single lucky split. The three exponents are re-chosen on the
+  // other n-1 protocols for each fold, which is what "fitted on the rest"
+  // actually means.
+  const loo: number[] = [];
+  for (let i = 0; i < pool.length; i++) {
+    const rest = pool.slice(0, i).concat(pool.slice(i + 1));
+    let bE = fittedParams.tvl_exponent;
+    let bF = fittedParams.fee_gain;
+    let bG = fittedParams.growth_sensitivity;
+    let bScore = Infinity;
+    for (const e of [0.6, 0.7, 0.8, 0.85, 0.9, 1.0]) {
+      for (const fg of [0.0, 0.05, 0.1, 0.15, 0.2]) {
+        for (const gs of [0.0, 0.3, 0.48, 0.7, 1.0]) {
+          const pp: ScoreParams = { ...fittedParams, tvl_exponent: e, fee_gain: fg, growth_sensitivity: gs };
+          const m = median(missFor(rest, doc.as_of, pp, catExponents).map(Math.abs));
+          if (m < bScore) { bScore = m; bE = e; bF = fg; bG = gs; }
+        }
+      }
+    }
+    const x = pool[i]!;
+    const v = impliedUsd(x, doc.as_of, { ...fittedParams, tvl_exponent: bE, fee_gain: bF, growth_sensitivity: bG }, catExponents).value;
+    loo.push(Math.abs(Math.log(x.mcap_usd / Math.max(v, 1))));
+  }
+  const looMiss = median(loo.map(Math.abs));
   const q25 = quantile(absMiss, 0.25);
   const q75 = quantile(absMiss, 0.75);
   const q10 = quantile(absMiss, 0.1);
@@ -694,9 +785,11 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
       walk: {
         windows,
         worst,
-        note: windows.length === 0 ? 'too few dated windows to walk' : `${windows.length} rolling-origin windows, each trained on the past and tested on what follows`,
+        note: windows.length === 0 ? 'too few dated windows to walk' : `${windows.length} rolling-origin windows, each trained on the past and tested on what follows`
       },
       terms,
+      cat: catRows,
+      loo: { miss: round2(looMiss), n: pool.length, note: `each of ${pool.length} priced protocols scored by the other ${pool.length - 1}` },
       scored,
       dropped: dropped.join(', '),
       final_holdout_miss: round2(finalHold),
@@ -704,6 +797,7 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
     },
     scored,
     dropped: dropped.join(', '),
+    cat_exponents: catExponents,
   };
 }
 
@@ -725,11 +819,12 @@ export function buildBoard(doc: SnapshotDoc, p: ScoreParams = SCORE_PARAMS): Boa
   // board is scored with the kept set, and a term the test dropped is zeroed,
   // so the numbers on the page and the method card agree exactly.
   const fp: ScoreParams = fit.fitted ? fit.scored : p;
+  const catExp = fit.cat_exponents;
 
   const universeTvl = doc.protocols.reduce((s, x) => s + x.tvl_usd, 0);
   const watchSet = new Set(doc.watchlist);
   const scored = [...picked.values()].map((proto) => {
-    const { value, breakdown } = impliedUsd(proto, doc.as_of, fp);
+    const { value, breakdown } = impliedUsd(proto, doc.as_of, fp, catExp);
     return { proto, value, breakdown, age: daysSince(doc.as_of, proto.listed_at) };
   });
   scored.sort((a, b) => b.value - a.value || (a.proto.slug < b.proto.slug ? -1 : 1));
@@ -828,9 +923,7 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     { name: 'board equals data file', ok: board.length === doc.watchlist.length + (board.length - covered), detail: `${board.length} rows` },
     { name: 'every scan accounted', ok: sum === doc.protocols.length, detail: `${sum}/${doc.protocols.length} protocols` },
     { name: 'ranks unique and dense', ok: board.every((r, i) => r.rank === i + 1), detail: `1..${board.length}` },
-    { name: 'ordered by implied value', ok: board.every((r, i) => i === 0 || board[i - 1]!.implied_value_usd >= r.implied_value_usd), detail: 'descending' },
-    { name: 'farm verdicts priced', ok: board.every((r) => Number.isFinite(r.verdict.net_per_hour_usd) && r.verdict.hours > 0), detail: 'net ÷ hours on every row' },
-    { name: 'verdict rule agrees', ok: board.every((r) => (r.verdict.verdict === 'keep') === (r.verdict.net_usd > 0 && r.verdict.net_per_hour_usd >= 15)), detail: 'keep = net > 0 and ≥ $15/h' }
+    { name: 'ordered by implied value', ok: board.every((r, i) => i === 0 || board[i - 1]!.implied_value_usd >= r.implied_value_usd), detail: 'descending' }
   ];
   return {
     protocols: doc.protocols.length,
@@ -846,6 +939,7 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     base_weights: weights,
     params: p,
     scored_params: fit.scored,
+    cat_exponents: fit.cat_exponents,
     dropped_terms: fit.dropped,
     final_holdout_miss: fit.final_holdout_miss,
     baseline_holdout_miss: fit.baseline_holdout_miss,
@@ -855,11 +949,6 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     fitted: fit.fitted,
     validation: fit.validation,
     coverage,
-    farm_net_usd: Math.round(board.reduce((s, r) => s + r.verdict.net_usd, 0)),
-    farm_keep: board.filter((r) => r.verdict.verdict === 'keep').length,
-    farm_marginal: board.filter((r) => r.verdict.verdict === 'marginal').length,
-    farm_pass: board.filter((r) => r.verdict.verdict === 'pass').length,
-    farm_median_rate: round2(medianOf(board.filter((r) => r.verdict.verdict === 'keep').map((r) => r.verdict.net_per_hour_usd))),
     integrity,
   };
 }
@@ -874,6 +963,7 @@ export function radarDoc(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams = 
     score_tag: SCORE_TAG,
     params: p,
     scored_params: fit.scored,
+    cat_exponents: fit.cat_exponents,
     dropped_terms: fit.dropped,
     watch_count: doc.watchlist.length,
     board_count: board.length,

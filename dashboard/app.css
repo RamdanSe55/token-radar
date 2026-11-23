@@ -263,18 +263,3 @@ table.mini th { color: var(--dim); text-transform: uppercase; letter-spacing: 0.
   .masthead { flex-direction: column; align-items: flex-start; }
 }
 
-.farm { padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
-.farm h2 { margin: 0 0 6px; font-size: 14px; }
-.farm .method { margin: 0 0 10px; }
-.farm-grid { display: flex; flex-direction: column; gap: 3px; }
-.farm-row { display: grid; grid-template-columns: 34px minmax(90px, 1fr) 60px minmax(50px, 1.4fr) 66px 78px; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10px; padding: 3px 0; border-bottom: 1px dashed var(--line); }
-.farm-row:last-child { border-bottom: 0; }
-.farm-rank { color: var(--dim); }
-.farm-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.farm-money { color: var(--dim); text-align: right; }
-.farm-rate { text-align: right; }
-.farm-rate.up { color: var(--up); }
-.farm-rate.down { color: var(--down); }
-.farm-net { text-align: right; color: var(--dim); }
-.meter.slim { height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; }
-.meter.slim i { display: block; height: 100%; background: var(--accent); }
