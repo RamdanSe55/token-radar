@@ -52,7 +52,7 @@ body {
   display: inline-block;
 }
 .wordmark { font-size: 16px; letter-spacing: 0.2px; display: block; }
-.masthead-left small { color: var(--dim); font-family: var(--mono); font-size: 11px; }
+.masthead-left small { color: var(--dim); font-family: var(--mono); font-size: 11px; display: block; max-width: 900px; }
 .masthead-meta { display: flex; gap: 12px; color: var(--dim); font-family: var(--mono); font-size: 11px; flex-wrap: wrap; }
 
 /* KPI strip */
@@ -70,8 +70,8 @@ body {
   min-width: 0;
 }
 .kpi dt { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; margin: 0 0 4px; }
-.kpi dd { margin: 0; font-size: 17px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.kpi dd small { color: var(--dim); font-size: 11px; }
+.kpi dd { margin: 0; font-size: 17px; font-family: var(--mono); }
+.kpi dd small { display: block; color: var(--dim); font-size: 11px; margin-top: 2px; }
 .kpi .bar { height: 3px; background: var(--panel-2); border-radius: 2px; margin-top: 6px; overflow: hidden; }
 .kpi .bar i { display: block; height: 100%; background: var(--accent); }
 
@@ -172,7 +172,7 @@ td.odds { font-family: var(--mono); font-size: 12px; }
 .coverage { padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
 .coverage h2 { margin: 0 0 8px; font-size: 14px; }
 .coverage h3 { margin: 12px 0 6px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.6px; }
-.cov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 6px; }
+.cov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
 .cov-row { display: flex; flex-direction: column; gap: 1px; padding: 7px 9px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; }
 .cov-name { font-size: 11px; color: var(--text); }
 .cov-count { font-family: var(--mono); font-size: 15px; color: var(--accent); }
@@ -181,7 +181,22 @@ td.odds { font-family: var(--mono); font-size: 12px; }
 .integrity .ok { color: var(--up); }
 .integrity .bad { color: var(--down); }
 
-.model-card { padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+/* counted view tabs */
+.count-row { flex-wrap: wrap; gap: 4px; }
+.count-row .tab { font-size: 11px; padding: 4px 8px; }
+
+/* range + watch badge + dolarized net */
+td.rng { white-space: nowrap; }
+td.rng .range-note { display: block; font-size: 10px; color: var(--dim); }
+.watch-badge { display: inline-block; margin-top: 3px; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 6px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(56, 211, 159, 0.35); }
+td .up { color: var(--up); }
+td .down { color: var(--down); }
+
+/* out-of-sample table */
+table.oos { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0; }
+table.oos th, table.oos td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+table.oos th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+table.oos td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .model-card h2 { margin: 0 0 6px; font-size: 14px; }
 .model-card h3 { margin: 12px 0 4px; font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.6px; }
 .equation {

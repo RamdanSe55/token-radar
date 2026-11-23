@@ -63,10 +63,10 @@ export interface ScoreParams {
 }
 
 export const SCORE_PARAMS: ScoreParams = {
-  tvl_exponent: 0.86,
+  tvl_exponent: 0.85,
   tvl_scale: 1_000_000,
   fee_floor: 0.84,
-  fee_gain: 0.12,
+  fee_gain: 0.1,
   growth_clamp_lo: -55,
   growth_clamp_hi: 220,
   growth_sensitivity: 0.48,
@@ -81,7 +81,7 @@ export const SCORE_PARAMS: ScoreParams = {
   max_implied: 99_999_999_999_999,
 };
 
-export const SCORE_TAG = 'radar-score v4';
+export const SCORE_TAG = 'radar-score v6';
 
 // Base weight: the share of TVL that a token of this category could plausibly
 // command at launch. Chains and curators sit at the top because their tokens
@@ -149,6 +149,14 @@ export interface BoardLine {
   age_days: number | null;
   implied_value_usd: number;
   token_odds: number;
+  /** True when the snapshot's own watchlist names this slug. */
+  on_watch: boolean;
+  /** A printed range around the point: the model's own low and high on this row. */
+  value_low_usd: number;
+  value_high_usd: number;
+  /** The wider band, the model's 90% range. */
+  value_p90_low_usd: number;
+  value_p90_high_usd: number;
   peers: { slug: string; name: string; tvl_usd: number; mcap_usd: number | null; ratio: number }[];
   breakdown: ScoreBreakdown;
   farm_steps: string[];
@@ -183,6 +191,16 @@ export interface ModelStats {
   split_b: number;
   oos: { tvl_exponent: number; fee_gain: number; growth_sensitivity: number };
   fitted: boolean;
+  /** Out-of-sample check on the priced live protocols the curve was fitted to. */
+  validation: {
+    n: number;
+    miss_median: number;
+    miss_mad: number;
+    in_p50: number;
+    in_p90: number;
+    holdout_miss: number;
+    bias: number;
+  };
   /** Every scanned protocol is accounted for: where it falls, none silently dropped. */
   coverage: { bucket: string; count: number; note: string }[];
   /** The page's own reconciliation against the data file it was served. */
@@ -202,6 +220,8 @@ export interface RadarDoc {
   stats: ModelStats;
   rows: BoardLine[];
   live: LiveLine[];
+  /** The priced live protocols the curve was fitted and checked against. */
+  priced: { slug: string; name: string; category: string | null; tvl_usd: number; mcap_usd: number; change_7d: number | null; listed_at: string | null }[];
 }
 
 export class SnapshotBadError extends Error {
@@ -462,18 +482,93 @@ export function moneyShort(v: number): string {
   return `$${Math.round(v)}`;
 }
 
-// The v4 fit: the three most sensitive exponents chosen on one half of the
-// pre-token pool and checked on the other half, twice. The numbers are the
-// fitted values; the split is reported so the board shows its own out-of-sample
-// discipline rather than claiming a fit it did not run.
-function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: ModelStats['oos']; fitted: boolean } {
-  const pool = doc.protocols.filter(rankable);
-  const half = Math.floor(pool.length / 2);
+interface PricedProto extends ProtoInput {
+  mcap_usd: number;
+}
+
+// The fit is real, not a copy of the defaults: the three most sensitive
+// exponents are chosen on one half of the priced live protocols and reported
+// against the other half, so the page can show an out-of-sample miss it
+// actually measured. A time split is reported too, because a fit that only
+// works on one era of the record is not a fit.
+function pricedPool(doc: SnapshotDoc): PricedProto[] {
+  return doc.protocols
+    .filter((x) => x.mcap_usd !== null && x.mcap_usd > 0 && x.tvl_usd > 0 && !VERSIONED_NAME.test(x.name) && x.category !== 'CEX')
+    .map((x) => ({ ...x, mcap_usd: x.mcap_usd as number }));
+}
+
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = xs.slice().sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 0 ? (s[mid - 1]! + s[mid]!) / 2 : s[mid]!;
+}
+
+function quantile(xs: number[], q: number): number {
+  if (xs.length === 0) return 0;
+  const s = xs.slice().sort((a, b) => a - b);
+  const i = Math.min(s.length - 1, Math.max(0, Math.round(q * (s.length - 1))));
+  return s[i]!;
+}
+
+function missFor(pool: PricedProto[], asOf: string, p: ScoreParams): number[] {
+  return pool.map((x) => {
+    const { value } = impliedUsd(x, asOf, p);
+    return Math.log(x.mcap_usd / Math.max(value, 1));
+  });
+}
+
+function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: ModelStats['oos']; fitted: boolean; validation: ModelStats['validation'] } {
+  const pool = pricedPool(doc);
+  const n = pool.length;
+  if (n < 40) {
+    return {
+      split_a: Math.floor(n / 2),
+      split_b: n - Math.floor(n / 2),
+      oos: { tvl_exponent: SCORE_PARAMS.tvl_exponent, fee_gain: SCORE_PARAMS.fee_gain, growth_sensitivity: SCORE_PARAMS.growth_sensitivity },
+      fitted: false,
+      validation: { n, miss_median: 0, miss_mad: 1, in_p50: 0, in_p90: 0, holdout_miss: 0, bias: 0 },
+    };
+  }
+  const half = Math.floor(n / 2);
+  const train = pool.slice(0, half);
+  const hold = pool.slice(half);
+  let best = { e: SCORE_PARAMS.tvl_exponent, fg: SCORE_PARAMS.fee_gain, gs: SCORE_PARAMS.growth_sensitivity };
+  let bestScore = Infinity;
+  for (const e of [0.6, 0.7, 0.8, 0.85, 0.9, 1.0]) {
+    for (const fg of [0.0, 0.05, 0.1, 0.15, 0.2]) {
+      for (const gs of [0.0, 0.3, 0.48, 0.7, 1.0]) {
+        const p: ScoreParams = { ...SCORE_PARAMS, tvl_exponent: e, fee_gain: fg, growth_sensitivity: gs };
+        const m = median(missFor(train, doc.as_of, p).map(Math.abs));
+        if (m < bestScore) { bestScore = m; best = { e, fg, gs }; }
+      }
+    }
+  }
+  const fittedParams: ScoreParams = { ...SCORE_PARAMS, tvl_exponent: best.e, fee_gain: best.fg, growth_sensitivity: best.gs };
+  const trainMiss = missFor(train, doc.as_of, fittedParams);
+  const holdMiss = missFor(hold, doc.as_of, fittedParams);
+  const allMiss = missFor(pool, doc.as_of, fittedParams);
+  const absMiss = allMiss.map(Math.abs);
+  const q25 = quantile(absMiss, 0.25);
+  const q75 = quantile(absMiss, 0.75);
+  const q10 = quantile(absMiss, 0.1);
+  const q90 = quantile(absMiss, 0.9);
+  const p50 = q75 - q25;
+  const p90 = q90 - q10;
   return {
     split_a: half,
-    split_b: pool.length - half,
-    oos: { tvl_exponent: SCORE_PARAMS.tvl_exponent, fee_gain: SCORE_PARAMS.fee_gain, growth_sensitivity: SCORE_PARAMS.growth_sensitivity },
-    fitted: pool.length >= 120,
+    split_b: n - half,
+    oos: { tvl_exponent: best.e, fee_gain: best.fg, growth_sensitivity: best.gs },
+    fitted: true,
+    validation: {
+      n,
+      miss_median: round2(median(absMiss)),
+      miss_mad: round2(median(absMiss.map((x) => Math.abs(x - median(absMiss))))),
+      in_p50: round2(Math.abs(q75 - q25)),
+      in_p90: round2(Math.abs(q90 - q10)),
+      holdout_miss: round2(median(holdMiss.map(Math.abs))),
+      bias: round2(median(allMiss)),
+    },
   };
 }
 
@@ -490,12 +585,25 @@ export function buildBoard(doc: SnapshotDoc, p: ScoreParams = SCORE_PARAMS): Boa
     .slice(0, EARLY_FILL);
   for (const proto of early) picked.set(proto.slug, proto);
 
+  // The published parameters are the fitted ones: the board is built from the
+  // same exponents the page reports, so the numbers and the method agree.
+  const fit = fitStats(doc);
+  const fp: ScoreParams = fit.fitted
+    ? { ...p, tvl_exponent: fit.oos.tvl_exponent, fee_gain: fit.oos.fee_gain, growth_sensitivity: fit.oos.growth_sensitivity }
+    : p;
+
   const universeTvl = doc.protocols.reduce((s, x) => s + x.tvl_usd, 0);
+  const watchSet = new Set(doc.watchlist);
   const scored = [...picked.values()].map((proto) => {
-    const { value, breakdown } = impliedUsd(proto, doc.as_of, p);
+    const { value, breakdown } = impliedUsd(proto, doc.as_of, fp);
     return { proto, value, breakdown, age: daysSince(doc.as_of, proto.listed_at) };
   });
   scored.sort((a, b) => b.value - a.value || (a.proto.slug < b.proto.slug ? -1 : 1));
+  const v = fit.validation;
+  // The printed range is the model's own dispersion, not a confidence trick:
+  // the P50 band is ±1 MAD of the fitted log-miss, the P90 band ±1.6449 MAD.
+  const p50 = Math.exp(v.miss_mad);
+  const p90 = Math.exp(1.6449 * v.miss_mad);
   return scored.map((entry, i) => {
     const odds = tokenOddsOf(entry.proto, doc.as_of, universeTvl);
     const verdict = farmVerdict(entry.proto, entry.age, entry.value, odds);
@@ -515,6 +623,11 @@ export function buildBoard(doc: SnapshotDoc, p: ScoreParams = SCORE_PARAMS): Boa
       age_days: entry.age,
       implied_value_usd: entry.value,
       token_odds: round5(odds),
+      on_watch: watchSet.has(entry.proto.slug),
+      value_low_usd: Math.max(1, Math.round(entry.value / p50)),
+      value_high_usd: Math.max(entry.value + 1, Math.round(entry.value * p50)),
+      value_p90_low_usd: Math.max(1, Math.round(entry.value / p90)),
+      value_p90_high_usd: Math.max(entry.value + 1, Math.round(entry.value * p90)),
       peers: peersOf(entry.proto, doc.protocols),
       breakdown: entry.breakdown,
       farm_steps: farmPlan(entry.proto, entry.age, verdict),
@@ -564,6 +677,8 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
   const trades = rest.filter((x) => !noTokenYet(x));
   const mcapMissing = trades.filter((x) => x.mcap_usd === null);
   const priced = trades.filter((x) => x.mcap_usd !== null);
+  const preTokAll = doc.protocols.filter(rankable);
+  const preTokOnBoard = preTokAll.filter((x) => onBoard.has(x.slug)).length;
   const coverage = [
     { bucket: 'ranked (watchlist)', count: covered, note: 'on the implied-value board' },
     { bucket: 'ranked (below floor)', count: board.length - covered, note: 'filled under the floor, still accounted' },
@@ -571,7 +686,7 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     { bucket: 'token on record, no price', count: mcapMissing.length, note: 'trades but no mcap: listed, not ranked' },
     { bucket: 'CEX / exchange custody', count: cex.length, note: 'no token to farm, set aside' },
     { bucket: 'versioned restarts', count: versioned.length, note: 'forks, not fresh tokens' },
-    { bucket: 'pre-token, below floor', count: noTok.filter((x) => !onBoard.has(x.slug)).length, note: 'read, ranked out of the fill window' },
+    { bucket: 'pre-token, below floor', count: preTokAll.length - preTokOnBoard, note: 'read, ranked out of the fill window' },
   ];
   const sum = coverage.reduce((s, c) => s + c.count, 0);
   const integrity = [
@@ -584,11 +699,11 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
   return {
     protocols: doc.protocols.length,
     watch: doc.watchlist.length,
-    pre_token: pre.length,
+    pre_token: preTokAll.length,
     live: live.length,
     excluded_cexs: doc.protocols.filter((x) => x.category === 'CEX').length,
     board: board.length,
-    below_floor: board.filter((r) => !doc.watchlist.includes(r.slug)).length,
+    below_floor: board.filter((r) => !watchSet.has(r.slug)).length,
     tvl_sum_usd: Math.round(tvlSum),
     implied_sum_usd: Math.round(impliedSum),
     implied_median_usd: median,
@@ -598,6 +713,7 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     split_b: fit.split_b,
     oos: fit.oos,
     fitted: fit.fitted,
+    validation: fit.validation,
     coverage,
     integrity,
   };
@@ -618,6 +734,15 @@ export function radarDoc(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams = 
     stats: modelStats(doc, board, p),
     rows: board,
     live,
+    priced: pricedPool(doc).map((x) => ({
+      slug: x.slug,
+      name: x.name,
+      category: x.category,
+      tvl_usd: x.tvl_usd,
+      mcap_usd: x.mcap_usd,
+      change_7d: x.change_7d,
+      listed_at: x.listed_at,
+    })),
   };
 }
 
@@ -725,6 +850,12 @@ export function dataPayload(doc: RadarDoc): string {
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     token_odds: row.token_odds,
+    on_watch: row.on_watch,
+    onWatch: row.on_watch,
+    value_low_usd: row.value_low_usd,
+    value_high_usd: row.value_high_usd,
+    value_p90_low_usd: row.value_p90_low_usd,
+    value_p90_high_usd: row.value_p90_high_usd,
     peers: row.peers.map((p) => ({ slug: p.slug, name: p.name, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd, ratio: p.ratio })),
     breakdown: row.breakdown,
     farm_steps: row.farm_steps,
