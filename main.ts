@@ -35,13 +35,17 @@ if (!existsSync(snapshotFile)) {
 const outDir = flagValue('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const doc = parseSnapshotDoc(readFileSync(snapshotFile, 'utf8'));
-const board = buildBoard(doc);
+// The blind test decides which value terms earn their place; the board is then
+// scored with the kept set, and the dropped ones are zeroed in the record.
+const probe = radarDoc(doc, buildBoard(doc));
+const scored = probe.scored_params;
+const board = buildBoard(doc, scored);
 const fault = boardFault(board, doc);
 if (fault !== null) {
   process.stderr.write(`radar-score: the board fails its own gate: ${fault}\n`);
   process.exit(1);
 }
-const radar: RadarDoc = radarDoc(doc, board);
+const radar: RadarDoc = radarDoc(doc, board, scored);
 
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'board.json'), `${JSON.stringify({ rows: board })}\n`);

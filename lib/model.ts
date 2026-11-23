@@ -81,7 +81,7 @@ export const SCORE_PARAMS: ScoreParams = {
   max_implied: 99_999_999_999_999,
 };
 
-export const SCORE_TAG = 'radar-score v7';
+export const SCORE_TAG = 'radar-score v8';
 
 // Base weight: the share of TVL that a token of this category could plausibly
 // command at launch. Chains and curators sit at the top because their tokens
@@ -187,6 +187,10 @@ export interface ModelStats {
   implied_median_usd: number;
   base_weights: [string, number][];
   params: ScoreParams;
+  scored_params: ScoreParams;
+  dropped_terms: string;
+  final_holdout_miss: number;
+  baseline_holdout_miss: number;
   split_a: number;
   split_b: number;
   oos: { tvl_exponent: number; fee_gain: number; growth_sensitivity: number };
@@ -202,6 +206,15 @@ export interface ModelStats {
     bias: number;
     /** The second, independent test: the split by age of record, not by index. */
     time: { train_a: number; train_b: number; miss_a: number; miss_b: number; note: string };
+    /** Rolling-origin: each dated window trains on what came before it, tests on what follows. */
+    walk: { windows: { train: number; test: number; test_miss: number }[]; worst: number; note: string };
+    /** Every value term, tested blind: kept where it beats the baseline, dropped where it does not. */
+    terms: { name: string; key: 'fee_gain' | 'growth_sensitivity' | 'maturity_gain' | 'chain_step' | 'evm_bonus'; kept: boolean; miss: number; delta: number; note: string }[];
+    /** The params the board is actually scored with: dropped terms are zeroed. */
+    scored: ScoreParams;
+    dropped: string;
+    final_holdout_miss: number;
+    baseline_holdout_miss: number;
   };
   /** Every scanned protocol is accounted for: where it falls, none silently dropped. */
   coverage: { bucket: string; count: number; note: string }[];
@@ -215,6 +228,9 @@ export interface RadarDoc {
   floor_usd: number;
   score_tag: string;
   params: ScoreParams;
+  /** The params the board was scored with: a term the blind test dropped is zeroed. */
+  scored_params: ScoreParams;
+  dropped_terms: string;
   watch_count: number;
   board_count: number;
   early_count: number;
@@ -520,17 +536,29 @@ function missFor(pool: PricedProto[], asOf: string, p: ScoreParams): number[] {
   });
 }
 
-function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: ModelStats['oos']; fitted: boolean; validation: ModelStats['validation'] } {
+function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: ModelStats['oos']; fitted: boolean; validation: ModelStats['validation']; scored: ScoreParams; dropped: string } {
   const pool = pricedPool(doc);
   const n = pool.length;
+  const bare: ScoreParams = { ...SCORE_PARAMS, tvl_exponent: SCORE_PARAMS.tvl_exponent, fee_gain: 0, growth_sensitivity: 0, maturity_gain: 0, chain_step: 0, evm_bonus: 0 };
+  const emptyValidation = (note: string): ModelStats['validation'] => ({
+    n, miss_median: 0, miss_mad: 1, in_p50: 0, in_p90: 0, holdout_miss: 0, bias: 0,
+    time: { train_a: 0, train_b: 0, miss_a: 0, miss_b: 0, note: 'too few priced protocols to split by time' },
+    walk: { windows: [], worst: 0, note: 'too few dated windows to walk' },
+    terms: [],
+    scored: bare,
+    dropped: '',
+    final_holdout_miss: 0,
+    baseline_holdout_miss: 0,
+  });
   if (n < 40) {
     return {
       split_a: Math.floor(n / 2),
       split_b: n - Math.floor(n / 2),
       oos: { tvl_exponent: SCORE_PARAMS.tvl_exponent, fee_gain: SCORE_PARAMS.fee_gain, growth_sensitivity: SCORE_PARAMS.growth_sensitivity },
       fitted: false,
-      validation: { n, miss_median: 0, miss_mad: 1, in_p50: 0, in_p90: 0, holdout_miss: 0, bias: 0,
-        time: { train_a: 0, train_b: 0, miss_a: 0, miss_b: 0, note: 'too few priced protocols to split by time' } },
+      validation: emptyValidation('too few priced protocols to fit'),
+      scored: bare,
+      dropped: '',
     };
   }
   const half = Math.floor(n / 2);
@@ -568,6 +596,43 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
   const young = ageCut === null ? [] : withAge.filter((x) => (daysSince(doc.as_of, x.listed_at) as number) > ageCut);
   const missOld = old.length > 0 ? median(missFor(old, doc.as_of, fittedParams).map(Math.abs)) : 0;
   const missYoung = young.length > 0 ? median(missFor(young, doc.as_of, fittedParams).map(Math.abs)) : 0;
+  // Rolling-origin: walk the dated windows forward. Each window trains on every
+  // protocol listed before it and is scored on the ones that follow, the way the
+  // board would actually be used — never on the future it is predicting.
+  const dated = pool.filter((x) => daysSince(doc.as_of, x.listed_at) !== null);
+  const byAge = dated.slice().sort((a, b) => (daysSince(doc.as_of, a.listed_at) as number) - (daysSince(doc.as_of, b.listed_at) as number));
+  const windows: { train: number; test: number; test_miss: number }[] = [];
+  if (byAge.length >= 30) {
+    const step = Math.max(1, Math.floor(byAge.length / 6));
+    for (let i = 10; i + 6 <= byAge.length; i += step) {
+      const tr = byAge.slice(0, i);
+      const te = byAge.slice(i, i + 6);
+      windows.push({ train: tr.length, test: te.length, test_miss: round2(median(missFor(te, doc.as_of, fittedParams).map(Math.abs))) });
+    }
+  }
+  // Every value term, tested blind against the bare curve: kept where it lowers
+  // the held-out miss, dropped where it does not. A term that only flatters the
+  // training set is a decoration, so the board is scored without it and the drop
+  // is reported, not hidden. This runs last, so the reported params are the ones
+  // the board is actually scored with.
+  const baselineMiss = median(missFor(hold, doc.as_of, { ...fittedParams, fee_gain: 0, growth_sensitivity: 0, maturity_gain: 0, chain_step: 0, evm_bonus: 0 }).map(Math.abs));
+  const termDefs: { name: string; key: 'fee_gain' | 'growth_sensitivity' | 'maturity_gain' | 'chain_step' | 'evm_bonus'; on: ScoreParams; off: ScoreParams; note: string }[] = [
+    { name: 'fee curve', key: 'fee_gain', on: { ...fittedParams, fee_gain: best.fg }, off: { ...fittedParams, fee_gain: 0 }, note: 'fee yield bends the curve' },
+    { name: 'growth tilt', key: 'growth_sensitivity', on: { ...fittedParams, growth_sensitivity: best.gs }, off: { ...fittedParams, growth_sensitivity: 0 }, note: '7d change, clamped' },
+    { name: 'maturity ramp', key: 'maturity_gain', on: { ...fittedParams, maturity_gain: SCORE_PARAMS.maturity_gain }, off: { ...fittedParams, maturity_gain: 0 }, note: 'older books score higher' },
+    { name: 'chain breadth', key: 'chain_step', on: { ...fittedParams, chain_step: SCORE_PARAMS.chain_step }, off: { ...fittedParams, chain_step: 0 }, note: 'multi-chain reach' },
+    { name: 'EVM bonus', key: 'evm_bonus', on: { ...fittedParams, evm_bonus: SCORE_PARAMS.evm_bonus }, off: { ...fittedParams, evm_bonus: 0 }, note: 'EVM deployability' },
+  ];
+  const terms = termDefs.map((t) => {
+    const withTerm = median(missFor(hold, doc.as_of, t.on).map(Math.abs));
+    const without = median(missFor(hold, doc.as_of, t.off).map(Math.abs));
+    const delta = round2(without - withTerm);
+    return { name: t.name, key: t.key, kept: delta >= 0, miss: round2(withTerm), delta, note: t.note };
+  });
+  const dropped = terms.filter((t) => !t.kept).map((t) => t.key);
+  const scored: ScoreParams = dropped.reduce<ScoreParams>((acc, key) => ({ ...acc, [key]: 0 }), fittedParams);
+  const finalHold = median(missFor(hold, doc.as_of, scored).map(Math.abs));
+  const worst = windows.length > 0 ? round2(Math.max(...windows.map((w) => w.test_miss))) : 0;
   return {
     split_a: half,
     split_b: n - half,
@@ -588,11 +653,24 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
         miss_b: round2(missYoung),
         note: ageCut === null ? 'no dated record to split on' : `older half trained on (age ≤ ${ageCut}d), newer half held out`,
       },
+      walk: {
+        windows,
+        worst,
+        note: windows.length === 0 ? 'too few dated windows to walk' : `${windows.length} rolling-origin windows, each trained on the past and tested on what follows`,
+      },
+      terms,
+      scored,
+      dropped: dropped.join(', '),
+      final_holdout_miss: round2(finalHold),
+      baseline_holdout_miss: round2(baselineMiss),
     },
+    scored,
+    dropped: dropped.join(', '),
   };
 }
 
 export function buildBoard(doc: SnapshotDoc, p: ScoreParams = SCORE_PARAMS): BoardLine[] {
+  const fit = fitStats(doc);
   const bySlug = new Map(doc.protocols.map((x) => [x.slug, x]));
   const picked = new Map<string, ProtoInput>();
   for (const slug of doc.watchlist) {
@@ -605,12 +683,10 @@ export function buildBoard(doc: SnapshotDoc, p: ScoreParams = SCORE_PARAMS): Boa
     .slice(0, EARLY_FILL);
   for (const proto of early) picked.set(proto.slug, proto);
 
-  // The published parameters are the fitted ones: the board is built from the
-  // same exponents the page reports, so the numbers and the method agree.
-  const fit = fitStats(doc);
-  const fp: ScoreParams = fit.fitted
-    ? { ...p, tvl_exponent: fit.oos.tvl_exponent, fee_gain: fit.oos.fee_gain, growth_sensitivity: fit.oos.growth_sensitivity }
-    : p;
+  // The published parameters are the ones the blind test left standing: the
+  // board is scored with the kept set, and a term the test dropped is zeroed,
+  // so the numbers on the page and the method card agree exactly.
+  const fp: ScoreParams = fit.fitted ? fit.scored : p;
 
   const universeTvl = doc.protocols.reduce((s, x) => s + x.tvl_usd, 0);
   const watchSet = new Set(doc.watchlist);
@@ -729,6 +805,10 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     implied_median_usd: median,
     base_weights: weights,
     params: p,
+    scored_params: fit.scored,
+    dropped_terms: fit.dropped,
+    final_holdout_miss: fit.final_holdout_miss,
+    baseline_holdout_miss: fit.baseline_holdout_miss,
     split_a: fit.split_a,
     split_b: fit.split_b,
     oos: fit.oos,
@@ -741,12 +821,15 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
 
 export function radarDoc(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams = SCORE_PARAMS): RadarDoc {
   const live = liveLines(doc);
+  const fit = fitStats(doc);
   return {
     as_of: doc.as_of,
     source: doc.source,
     floor_usd: doc.floor_usd,
     score_tag: SCORE_TAG,
     params: p,
+    scored_params: fit.scored,
+    dropped_terms: fit.dropped,
     watch_count: doc.watchlist.length,
     board_count: board.length,
     early_count: board.filter((r) => !doc.watchlist.includes(r.slug)).length,

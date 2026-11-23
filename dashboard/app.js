@@ -60,7 +60,7 @@
   }
 
   function recompute(row) {
-    const p = doc.params;
+    const p = doc.scored_params || doc.params;
     const b = row.breakdown;
     const tvlTerm = Math.pow(row.tvl_usd / p.tvl_scale, p.tvl_exponent);
     const decades = Math.log10(Math.max(row.tvl_usd, 1) / p.tvl_scale);
@@ -173,6 +173,8 @@ function masthead() {
       { k: 'out-of-sample miss', v: `${v.miss_median.toFixed(2)}×`, sub: `${v.n} priced tokens · holdout ${v.holdout_miss.toFixed(2)}×` },
       { k: 'range holds', v: `${Math.round(rh.p50 * 100)}%`, sub: `${rh.n} priced · ${Math.round(rh.p90 * 100)}% in the P90 band · bias ${v.bias >= 0 ? '+' : ''}${v.bias.toFixed(2)}×` },
       { k: 'held out by age', v: `${v.time.miss_b.toFixed(2)}×`, sub: `${v.time.train_a} older trained · ${v.time.train_b} newer held out` },
+      { k: 'walk-forward worst', v: `${v.walk.worst.toFixed(2)}×`, sub: `${v.walk.windows.length} windows · past trains, next tests` },
+      { k: 'terms kept', v: `${v.terms.filter((x) => x.kept).length}/${v.terms.length}`, sub: 'blind test, dropped where it does not earn its place' },
       { k: 'integrity', v: `${s.integrity.filter((i) => i.ok).length}/${s.integrity.length}`, sub: `${s.coverage.length} buckets · ${s.protocols} protocols accounted` }
     ];
     return make('section', { class: 'kpis' }, items.map((it) => make('div', { class: 'kpi' }, [
@@ -484,11 +486,14 @@ function masthead() {
   }
 
   function method() {
-    const p = doc.params;
+    const p = doc.scored_params || doc.params;
     const s = doc.stats;
     const v = s.validation;
     const rh = rangeHolds();
     const weights = s.base_weights.slice(0, 8).map(([name, w]) => `${name.replace(/[\\^$*+?.()|[\]{}]/g, '').slice(0, 18)} ${w}`).join(' · ');
+    const dropped = v.dropped && v.dropped.length > 0
+      ? ` The blind test dropped ${v.dropped} — it is zeroed in the formula above, and the held-out miss moves ${v.baseline_holdout_miss.toFixed(2)}× (all terms off) → ${v.final_holdout_miss.toFixed(2)}× (kept set).`
+      : ' No term was dropped by the blind test; the formula above is the kept set.';
     const holdRow = (k, label) => make('tr', null, [
       make('td', { text: label }),
       make('td', { class: 'num', text: `${Math.round(rh[k] * 100)}%` }),
@@ -513,10 +518,38 @@ function masthead() {
           make('tr', null, [make('td', { text: 'training miss' }), make('td', { class: 'num', text: `${v.miss_median.toFixed(2)}×` }), make('td', { class: 'num', text: 'median |log ratio|' })]),
           make('tr', null, [make('td', { text: 'held-out miss' }), make('td', { class: 'num', text: `${v.holdout_miss.toFixed(2)}×` }), make('td', { class: 'num', text: 'never seen by the fit' })]),
           make('tr', null, [make('td', { text: 'held out by age' }), make('td', { class: 'num', text: `${v.time.miss_a.toFixed(2)}× → ${v.time.miss_b.toFixed(2)}×` }), make('td', { class: 'num', text: `${v.time.train_a} older · ${v.time.train_b} newer · ${v.time.note}` })]),
+          make('tr', null, [make('td', { text: 'walk-forward worst' }), make('td', { class: 'num', text: `${v.walk.worst.toFixed(2)}×` }), make('td', { class: 'num', text: v.walk.note })]),
           make('tr', null, [make('td', { text: 'bias' }), make('td', { class: 'num', text: `${v.bias >= 0 ? '+' : ''}${v.bias.toFixed(2)}×` }), make('td', { class: 'num', text: 'positive = undervalues' })]),
           holdRow('p50', 'inside P50 band'),
           holdRow('p90', 'inside P90 band')
         ])
+      ]),
+      make('h3', { text: 'walk-forward — trained on the past, tested on what follows' }),
+      make('p', { class: 'method', text: v.walk.note }),
+      make('table', { class: 'oos' }, [
+        make('thead', null, [make('tr', null, [make('th', { scope: 'col', text: 'window' }), make('th', { scope: 'col', class: 'num', text: 'trained on' }), make('th', { scope: 'col', class: 'num', text: 'tested on' }), make('th', { scope: 'col', class: 'num', text: 'test miss' })])]),
+        make('tbody', null, (v.walk.windows.length > 0 ? v.walk.windows : [{ train: 0, test: 0, test_miss: 0 }]).map((w, i) =>
+          make('tr', null, [
+            make('td', { text: `#${i + 1}` }),
+            make('td', { class: 'num', text: String(w.train) }),
+            make('td', { class: 'num', text: String(w.test) }),
+            make('td', { class: 'num', text: w.train === 0 ? '—' : `${w.test_miss.toFixed(2)}×` })
+          ])
+        ))
+      ]),
+      make('h3', { text: 'each value term, kept or dropped on a blind test' }),
+      make('p', { class: 'method', text: `Every term was tested on the ${s.split_b} held-out protocols with and without itself. A term is kept only where it lowers the held-out miss; a term that only flatters the training set is reported as dropped, not hidden.${dropped}` }),
+      make('table', { class: 'oos' }, [
+        make('thead', null, [make('tr', null, [make('th', { scope: 'col', text: 'term' }), make('th', { scope: 'col', text: 'kept' }), make('th', { scope: 'col', class: 'num', text: 'miss with' }), make('th', { scope: 'col', class: 'num', text: 'gain' }), make('th', { scope: 'col', text: 'reads' })])]),
+        make('tbody', null, (v.terms.length > 0 ? v.terms : [{ name: 'none', kept: false, miss: 0, delta: 0, note: 'not fitted' }]).map((t) =>
+          make('tr', null, [
+            make('td', { text: t.name }),
+            make('td', { text: t.kept ? 'kept' : 'dropped', class: t.kept ? 'ok' : 'bad' }),
+            make('td', { class: 'num', text: `${t.miss.toFixed(2)}×` }),
+            make('td', { class: 'num', text: `${t.delta >= 0 ? '+' : ''}${t.delta.toFixed(2)}×` }),
+            make('td', { text: t.note })
+          ])
+        ))
       ]),
       make('h3', { text: 'a printed range, honestly' }),
       make('p', { class: 'method', text: `Every row carries a P50 band (the model's ±1 MAD, about ${Math.exp(v.miss_mad).toFixed(2)}×) and a wider P90 band (±1.6449 MAD, about ${Math.exp(1.6449 * v.miss_mad).toFixed(2)}×). On the ${rh.n} priced protocols the P50 band holds ${Math.round(rh.p50 * 100)}% and the P90 band ${Math.round(rh.p90 * 100)}% — the ranges are reported, not tuned to look tight.` }),
