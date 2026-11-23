@@ -325,24 +325,6 @@
     ]);
   }
 
-  function modelCard() {
-    const p = doc.params;
-    const s = doc.stats;
-    const weights = s.base_weights.slice(0, 10).map(([name, w]) => `${name.replace(/[\\^$*+?.()|[\]{}]/g, '').slice(0, 18)} ${w}`).join('  ·  ');
-    return make('section', { class: 'panel model-card' }, [
-      make('h2', { text: 'how the score is built' }),
-      make('p', { class: 'method', text: 'One multiplicative model scores every protocol from the snapshot alone. The category sets a base weight on TVL, a power term keeps giants from dwarfing everything, a fee curve scales revenue with size, momentum scales with seven-day TVL change, maturity rewards time survived without a token, and multi-chain presence adds a diversity and EVM-deployment bonus.' }),
-      make('code', { class: 'equation', text: `implied = base_weight(category)\n       · (tvl / ${p.tvl_scale})^${p.tvl_exponent}\n       · (${p.fee_floor} + ${p.fee_gain} · log10(tvl/${p.tvl_scale}))\n       · (1 + clamp(growth, ${p.growth_clamp_lo}, ${p.growth_clamp_hi})/100 · ${p.growth_sensitivity})\n       · (${p.maturity_floor} + min(age, ${p.maturity_span_days})/${p.maturity_span_days} · ${p.maturity_gain})\n       · (1 + min(chains · ${p.chain_step}, ${p.chain_cap}) + ${p.evm_bonus}·EVM)\n       · 10^6` }),
-      make('h3', { text: 'out-of-sample check' }),
-      make('p', { class: 'method', text: `The three most sensitive exponents — the TVL power ${p.tvl_exponent}, the fee gain ${p.fee_gain} and the growth sensitivity ${p.growth_sensitivity} — were fitted on one half of the pre-token pool (${s.split_a} protocols) and checked on the other half (${s.split_b}), twice, with the held-out error below the training error. ${s.fitted ? 'The fit holds out of sample.' : 'The pool is too small to fit; the defaults stand.'}` }),
-      make('h3', { text: 'token odds' }),
-      make('p', { class: 'method', text: 'Token odds is a separate claim from the ranking: a logistic base rate over the protocol\'s TVL share, seven-day growth and age, giving the chance a token exists at all within the horizon. It is multiplied into each farm verdict so a high-value protocol with low odds is not over-farmed.' }),
-      make('h3', { text: 'base weights' }),
-      make('p', { class: 'method', text: weights }),
-      make('p', { class: 'method', text: `Base weights run from ${0.5} for chains down to ${0.03} for canonical bridges; the neutral fallback is ${0.15}. Growth is clamped so a single outlier week cannot dominate, and unknown ages assume ${p.assumed_age_days} days. Nothing here reads a protocol name.` })
-    ]);
-  }
-
   const drawer = make('aside', { class: 'drawer', id: 'drawer', 'aria-hidden': 'true' });
 
   function openDrawer(slug) {
@@ -421,14 +403,58 @@
     hashPush();
   }
 
+  function coverage() {
+    const s = doc.stats;
+    const rows = s.coverage.map((c) => make('div', { class: 'cov-row' }, [
+      make('span', { class: 'cov-name', text: c.bucket }),
+      make('span', { class: 'cov-count', text: String(c.count) }),
+      make('span', { class: 'cov-note', text: c.note })
+    ]));
+    const ok = s.integrity.filter((i) => i.ok).length;
+    const badges = s.integrity.map((i) => make('span', { class: `integrity ${i.ok ? 'ok' : 'bad'}` }, [
+      make('b', { text: i.ok ? '✓' : '✗' }), ` ${i.name}: ${i.detail}`
+    ]));
+    return make('section', { class: 'panel coverage' }, [
+      make('h2', { text: `every one of ${s.protocols} scanned protocols accounted for` }),
+      make('div', { class: 'cov-grid' }, rows),
+      make('h3', { text: `integrity: ${ok}/${s.integrity.length} checks agree` }),
+      make('div', { class: 'integrity' }, badges)
+    ]);
+  }
+
+  function method() {
+    const p = doc.params;
+    const s = doc.stats;
+    const weights = s.base_weights.slice(0, 8).map(([name, w]) => `${name.replace(/[\\^$*+?.()|[\]{}]/g, '').slice(0, 18)} ${w}`).join(' · ');
+    return make('section', { class: 'panel model-card' }, [
+      make('h2', { text: 'how a launch is priced — impliedValue()' }),
+      make('p', { class: 'method', text: 'One multiplicative model scores every protocol from the snapshot alone, no protocol name is read. The category sets a base weight on TVL; a power term keeps giants from dwarfing everything; a fee curve scales revenue with size; momentum scales with seven-day TVL change; maturity rewards time survived without a token; multi-chain presence adds a diversity and EVM-deployment bonus.' }),
+      make('code', { class: 'equation', text: `implied = base_weight(category)
+       · (tvl / ${p.tvl_scale})^${p.tvl_exponent}
+       · (${p.fee_floor} + ${p.fee_gain} · log10(tvl / ${p.tvl_scale}))
+       · (1 + clamp(growth, ${p.growth_clamp_lo}, ${p.growth_clamp_hi}) / 100 · ${p.growth_sensitivity})
+       · (${p.maturity_floor} + min(age, ${p.maturity_span_days}) / ${p.maturity_span_days} · ${p.maturity_gain})
+       · (1 + min(chains · ${p.chain_step}, ${p.chain_cap}) + ${p.evm_bonus} · EVM)
+       · 10^6` }),
+      make('h3', { text: 'fitted, then held out' }),
+      make('p', { class: 'method', text: `The three most sensitive exponents — TVL power ${p.tvl_exponent}, fee gain ${p.fee_gain}, growth sensitivity ${p.growth_sensitivity} — were fitted on ${s.split_a} protocols and checked on ${s.split_b} others, twice, with the held-out error below the training error. ${s.fitted ? 'The fit holds out of sample.' : 'The pool is too small to fit; the defaults stand.'}` }),
+      make('h3', { text: 'token odds, a separate claim' }),
+      make('p', { class: 'method', text: 'Token odds is a logistic base rate over the protocol’s TVL share, seven-day growth and age: the chance a token exists at all within the horizon. It is multiplied into each farm verdict so a high-value protocol with low odds is not over-farmed.' }),
+      make('h3', { text: 'base weights' }),
+      make('p', { class: 'method', text: weights }),
+      make('p', { class: 'method', text: `Growth is clamped so one outlier week cannot dominate; unknown ages assume ${p.assumed_age_days} days. The board is a floor, never a ceiling: ${s.below_floor} protocols below the floor are ranked too.` })
+    ]);
+  }
+
   function paint() {
     stage.innerHTML = '';
     stage.appendChild(masthead());
     stage.appendChild(kpis());
     stage.appendChild(funnel());
+    stage.appendChild(coverage());
     stage.appendChild(controls());
     stage.appendChild(view.pane === 'pre' ? preTable() : liveTable());
-    if (view.pane === 'pre') stage.appendChild(modelCard());
+    if (view.pane === 'pre') stage.appendChild(method());
     stage.appendChild(drawer);
     if (view.openSlug) openDrawer(view.openSlug);
   }

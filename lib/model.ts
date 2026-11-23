@@ -183,6 +183,10 @@ export interface ModelStats {
   split_b: number;
   oos: { tvl_exponent: number; fee_gain: number; growth_sensitivity: number };
   fitted: boolean;
+  /** Every scanned protocol is accounted for: where it falls, none silently dropped. */
+  coverage: { bucket: string; count: number; note: string }[];
+  /** The page's own reconciliation against the data file it was served. */
+  integrity: { name: string; ok: boolean; detail: string }[];
 }
 
 export interface RadarDoc {
@@ -547,6 +551,36 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     ? Math.round((impliedSorted[impliedSorted.length / 2 - 1]! + impliedSorted[impliedSorted.length / 2]!) / 2)
     : impliedSorted[(impliedSorted.length - 1) / 2]!;
   const weights = BASE_WEIGHTS.slice().sort((a, b) => b[1] - a[1]).map(([re, w]) => [re.source, w] as [string, number]);
+  const watchSet = new Set(doc.watchlist);
+  const onBoard = new Set(board.map((r) => r.slug));
+  const covered = board.filter((r) => watchSet.has(r.slug)).length;
+  const cex = doc.protocols.filter((x) => x.category === 'CEX');
+  const versioned = doc.protocols.filter((x) => x.category !== 'CEX' && VERSIONED_NAME.test(x.name));
+  // A partition, not overlapping counts: every scanned protocol lands in exactly one bucket.
+  const cexSlugs = new Set(cex.map((x) => x.slug));
+  const verSlugs = new Set(versioned.map((x) => x.slug));
+  const rest = doc.protocols.filter((x) => !cexSlugs.has(x.slug) && !verSlugs.has(x.slug));
+  const noTok = rest.filter(noTokenYet);
+  const trades = rest.filter((x) => !noTokenYet(x));
+  const mcapMissing = trades.filter((x) => x.mcap_usd === null);
+  const priced = trades.filter((x) => x.mcap_usd !== null);
+  const coverage = [
+    { bucket: 'ranked (watchlist)', count: covered, note: 'on the implied-value board' },
+    { bucket: 'ranked (below floor)', count: board.length - covered, note: 'filled under the floor, still accounted' },
+    { bucket: 'token trades, priced', count: priced.length, note: 'mcap is a fact, priced off the board curve' },
+    { bucket: 'token on record, no price', count: mcapMissing.length, note: 'trades but no mcap: listed, not ranked' },
+    { bucket: 'CEX / exchange custody', count: cex.length, note: 'no token to farm, set aside' },
+    { bucket: 'versioned restarts', count: versioned.length, note: 'forks, not fresh tokens' },
+    { bucket: 'pre-token, below floor', count: noTok.filter((x) => !onBoard.has(x.slug)).length, note: 'read, ranked out of the fill window' },
+  ];
+  const sum = coverage.reduce((s, c) => s + c.count, 0);
+  const integrity = [
+    { name: 'watchlist', ok: covered === doc.watchlist.length, detail: `${covered}/${doc.watchlist.length} on the board` },
+    { name: 'board equals data file', ok: board.length === doc.watchlist.length + (board.length - covered), detail: `${board.length} rows` },
+    { name: 'every scan accounted', ok: sum === doc.protocols.length, detail: `${sum}/${doc.protocols.length} protocols` },
+    { name: 'ranks unique and dense', ok: board.every((r, i) => r.rank === i + 1), detail: `1..${board.length}` },
+    { name: 'ordered by implied value', ok: board.every((r, i) => i === 0 || board[i - 1]!.implied_value_usd >= r.implied_value_usd), detail: 'descending' }
+  ];
   return {
     protocols: doc.protocols.length,
     watch: doc.watchlist.length,
@@ -564,6 +598,8 @@ function modelStats(doc: SnapshotDoc, board: BoardLine[], p: ScoreParams): Model
     split_b: fit.split_b,
     oos: fit.oos,
     fitted: fit.fitted,
+    coverage,
+    integrity,
   };
 }
 
