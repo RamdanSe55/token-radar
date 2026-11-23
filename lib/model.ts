@@ -1,4 +1,4 @@
-// radar-score v10 — implied-value model for pre-token DeFi protocols.
+// radar-score v11 — implied-value model for pre-token DeFi protocols.
 //
 // The radar's job: a protocol with no token yet still creates real economic
 // value. Its future token can only claim a slice of that value, and the slice
@@ -7,18 +7,24 @@
 // broadly it is deployed. This module turns one sealed snapshot into a ranked
 // board.
 //
-// v10's score is a multiplicative model over the snapshot's own figures, fitted
-// once on a held-out split, then checked out of sample three ways (index, age
-// and rolling-origin), with every term kept or dropped on a blind test:
+// v11's score is a multiplicative model over the snapshot's own figures, fitted
+// once on a held-out split over a five-way grid, then checked out of sample
+// three ways (index, age and rolling-origin) with every term kept or dropped on
+// a blind test. Each category with enough priced peers may earn its own size
+// exponent, kept only where it lowers that category's held-out miss:
 //
 //   implied = BASE(category)
-//           · (tvl / TVL_SCALE)^TVL_EXPONENT        size curve
+//           · (tvl / TVL_SCALE)^EXPONENT(category or global)   size curve
 //           · fee_curve(log10 tvl)                    revenue scale, fitted
 //           · (1 + clamp(growth)/100 · GROWTH_SENS)  momentum (blind-kept)
 //           · (MAT_FLOOR + min(age,SPAN)/SPAN·GAIN)   maturity
 //           · (1 + min(chains·CHAIN_STEP, CAP))       diversity
 //           · (1 + 0.06·EVM)                          deployment breadth
 //           · 10^6
+//
+// The printed range is conformalised on the priced set: the band width is the
+// miss MAD, and the page reports the share of priced protocols it actually
+// holds, so a tight-looking range cannot hide a model that misses.
 //
 // Every term is a pure function of snapshot fields; no protocol name is
 // special-cased, so the whole board recomputes from the snapshot alone.
@@ -82,7 +88,7 @@ export const SCORE_PARAMS: ScoreParams = {
   max_implied: 99_999_999_999_999,
 };
 
-export const SCORE_TAG = 'radar-score v10';
+export const SCORE_TAG = 'radar-score v11';
 
 // Base weight: the share of TVL that a token of this category could plausibly
 // command at launch. Chains and curators sit at the top because their tokens
@@ -579,6 +585,14 @@ function median(xs: number[]): number {
   return s.length % 2 === 0 ? (s[mid - 1]! + s[mid]!) / 2 : s[mid]!;
 }
 
+/** Share of values at or below `bound`. */
+function frac(xs: number[], bound: number): number {
+  if (xs.length === 0) return 0;
+  let n = 0;
+  for (const x of xs) if (x <= bound) n += 1;
+  return n / xs.length;
+}
+
 function quantile(xs: number[], q: number): number {
   if (xs.length === 0) return 0;
   const s = xs.slice().sort((a, b) => a - b);
@@ -624,18 +638,22 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
   const half = Math.floor(n / 2);
   const train = pool.slice(0, half);
   const hold = pool.slice(half);
-  let best = { e: SCORE_PARAMS.tvl_exponent, fg: SCORE_PARAMS.fee_gain, gs: SCORE_PARAMS.growth_sensitivity };
-  let bestScore = Infinity;
+  let best = { e: SCORE_PARAMS.tvl_exponent, fg: SCORE_PARAMS.fee_gain, gs: SCORE_PARAMS.growth_sensitivity, mg: SCORE_PARAMS.maturity_gain, cs: SCORE_PARAMS.chain_step };
+  let bestM = Infinity;
   for (const e of [0.6, 0.7, 0.8, 0.85, 0.9, 1.0]) {
     for (const fg of [0.0, 0.05, 0.1, 0.15, 0.2]) {
       for (const gs of [0.0, 0.3, 0.48, 0.7, 1.0]) {
-        const p: ScoreParams = { ...SCORE_PARAMS, tvl_exponent: e, fee_gain: fg, growth_sensitivity: gs };
-        const m = median(missFor(train, doc.as_of, p).map(Math.abs));
-        if (m < bestScore) { bestScore = m; best = { e, fg, gs }; }
+        for (const mg of [0.0, 0.21, 0.42, 0.6]) {
+          for (const cs of [0.0, 0.03, 0.06]) {
+            const pp: ScoreParams = { ...SCORE_PARAMS, tvl_exponent: e, fee_gain: fg, growth_sensitivity: gs, maturity_gain: mg, chain_step: cs };
+            const m = median(missFor(train, doc.as_of, pp, {}).map(Math.abs));
+            if (m < bestM) { bestM = m; best = { e, fg, gs, mg, cs }; }
+          }
+        }
       }
     }
   }
-  const fittedParams: ScoreParams = { ...SCORE_PARAMS, tvl_exponent: best.e, fee_gain: best.fg, growth_sensitivity: best.gs };
+  const fittedParams: ScoreParams = { ...SCORE_PARAMS, tvl_exponent: best.e, fee_gain: best.fg, growth_sensitivity: best.gs, maturity_gain: best.mg, chain_step: best.cs };
   const trainMiss = missFor(train, doc.as_of, fittedParams);
   // A category's own size exponent: a lending book and a bridge scale with TVL
   // differently, so a single global power is too coarse. For every category
@@ -765,14 +783,16 @@ function fitStats(doc: SnapshotDoc): { split_a: number; split_b: number; oos: Mo
   return {
     split_a: half,
     split_b: n - half,
-    oos: { tvl_exponent: best.e, fee_gain: best.fg, growth_sensitivity: best.gs },
+    oos: { tvl_exponent: best.e, fee_gain: best.fg, growth_sensitivity: best.gs, maturity_gain: best.mg, chain_step: best.cs },
     fitted: true,
     validation: {
       n,
       miss_median: round2(median(absMiss)),
       miss_mad: round2(median(absMiss.map((x) => Math.abs(x - median(absMiss))))),
-      in_p50: round2(Math.abs(q75 - q25)),
-      in_p90: round2(Math.abs(q90 - q10)),
+      // Coverage: how often the printed band actually holds on the priced set.
+      // A band that never holds is a confidence trick, so it is reported.
+      in_p50: round2(frac(absMiss, p50)),
+      in_p90: round2(frac(absMiss, p90)),
       holdout_miss: round2(median(holdMiss.map(Math.abs))),
       bias: round2(median(allMiss)),
       time: {
